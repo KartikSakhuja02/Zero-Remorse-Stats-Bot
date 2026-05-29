@@ -41,7 +41,7 @@ async def run_bot() -> None:
     settings = load_settings()
     logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO))
 
-    database = Database(settings.database_path)
+    database = Database(settings.database_url)
     bot = ScrimBot(database=database, guild_id=settings.guild_id)
     async with bot:
         await bot.start(settings.token)

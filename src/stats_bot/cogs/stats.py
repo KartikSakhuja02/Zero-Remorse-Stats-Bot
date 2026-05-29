@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 import discord
 from discord import app_commands
@@ -29,7 +28,11 @@ class StatsCog(commands.Cog):
     async def add_player(self, interaction: discord.Interaction, name: str) -> None:
         normalized = self._normalize_name(name)
         with self.database.connect() as connection:
-            connection.execute("INSERT OR IGNORE INTO players (name) VALUES (?)", (normalized,))
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO players (name) VALUES (%s) ON CONFLICT (name) DO NOTHING",
+                    (normalized,),
+                )
 
         await interaction.response.send_message(f"Saved player: {normalized}", ephemeral=True)
 
@@ -51,30 +54,33 @@ class StatsCog(commands.Cog):
             return
 
         with self.database.connect() as connection:
-            cursor = connection.execute("INSERT INTO matches (note) VALUES (?)", (note,))
-            match_id = cursor.lastrowid
+            with connection.cursor() as cursor:
+                cursor.execute("INSERT INTO matches (note) VALUES (%s) RETURNING id", (note,))
+                match_id = cursor.fetchone()["id"]
 
             for entry in parsed_entries:
-                player_row = connection.execute(
-                    "SELECT id FROM players WHERE name = ?",
-                    (entry.name,),
-                ).fetchone()
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT id FROM players WHERE name = %s", (entry.name,))
+                    player_row = cursor.fetchone()
+
                 if player_row is None:
-                    player_cursor = connection.execute(
-                        "INSERT INTO players (name) VALUES (?)",
-                        (entry.name,),
-                    )
-                    player_id = player_cursor.lastrowid
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "INSERT INTO players (name) VALUES (%s) RETURNING id",
+                            (entry.name,),
+                        )
+                        player_id = cursor.fetchone()["id"]
                 else:
                     player_id = player_row["id"]
 
-                connection.execute(
-                    """
-                    INSERT INTO player_match_stats (match_id, player_id, kills, is_mvp)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (match_id, player_id, entry.kills, int(entry.is_mvp)),
-                )
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO player_match_stats (match_id, player_id, kills, is_mvp)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (match_id, player_id, entry.kills, int(entry.is_mvp)),
+                    )
 
         summary_lines = [
             f"Recorded match #{match_id} with {len(parsed_entries)} players.",
@@ -93,20 +99,22 @@ class StatsCog(commands.Cog):
     async def player_stats(self, interaction: discord.Interaction, name: str) -> None:
         normalized = self._normalize_name(name)
         with self.database.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT
-                    p.name,
-                    COUNT(pms.id) AS matches,
-                    COALESCE(SUM(pms.kills), 0) AS kills,
-                    COALESCE(SUM(pms.is_mvp), 0) AS mvps
-                FROM players p
-                LEFT JOIN player_match_stats pms ON pms.player_id = p.id
-                WHERE p.name = ?
-                GROUP BY p.id
-                """,
-                (normalized,),
-            ).fetchone()
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        p.name,
+                        COUNT(pms.id) AS matches,
+                        COALESCE(SUM(pms.kills), 0) AS kills,
+                        COALESCE(SUM(pms.is_mvp), 0) AS mvps
+                    FROM players p
+                    LEFT JOIN player_match_stats pms ON pms.player_id = p.id
+                    WHERE p.name = %s
+                    GROUP BY p.id
+                    """,
+                    (normalized,),
+                )
+                row = cursor.fetchone()
 
         if row is None:
             await interaction.response.send_message(f"No stats found for {normalized}.", ephemeral=True)
@@ -144,24 +152,26 @@ class StatsCog(commands.Cog):
             return
 
         with self.database.connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT
-                    p.name,
-                    COUNT(pms.id) AS matches,
-                    COALESCE(SUM(pms.kills), 0) AS kills,
-                    COALESCE(SUM(pms.is_mvp), 0) AS mvps,
-                    CASE
-                        WHEN COUNT(pms.id) = 0 THEN 0.0
-                        ELSE CAST(SUM(pms.kills) AS REAL) / COUNT(pms.id)
-                    END AS km
-                FROM players p
-                LEFT JOIN player_match_stats pms ON pms.player_id = p.id
-                GROUP BY p.id
-                ORDER BY {order_clause}, p.name COLLATE NOCASE
-                LIMIT 10
-                """
-            ).fetchall()
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT
+                        p.name,
+                        COUNT(pms.id) AS matches,
+                        COALESCE(SUM(pms.kills), 0) AS kills,
+                        COALESCE(SUM(pms.is_mvp), 0) AS mvps,
+                        CASE
+                            WHEN COUNT(pms.id) = 0 THEN 0.0
+                            ELSE CAST(SUM(pms.kills) AS DOUBLE PRECISION) / COUNT(pms.id)
+                        END AS km
+                    FROM players p
+                    LEFT JOIN player_match_stats pms ON pms.player_id = p.id
+                    GROUP BY p.id
+                    ORDER BY {order_clause}, lower(p.name)
+                    LIMIT 10
+                    """
+                )
+                rows = cursor.fetchall()
 
         if not rows:
             await interaction.response.send_message("No players have been recorded yet.", ephemeral=True)
@@ -178,23 +188,26 @@ class StatsCog(commands.Cog):
     @stats.command(name="recent", description="Show the latest recorded match")
     async def recent_match(self, interaction: discord.Interaction) -> None:
         with self.database.connect() as connection:
-            match = connection.execute(
-                "SELECT id, played_at, note FROM matches ORDER BY id DESC LIMIT 1"
-            ).fetchone()
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT id, played_at, note FROM matches ORDER BY id DESC LIMIT 1")
+                match = cursor.fetchone()
+
             if match is None:
                 await interaction.response.send_message("No matches recorded yet.", ephemeral=True)
                 return
 
-            rows = connection.execute(
-                """
-                SELECT p.name, pms.kills, pms.is_mvp
-                FROM player_match_stats pms
-                JOIN players p ON p.id = pms.player_id
-                WHERE pms.match_id = ?
-                ORDER BY pms.is_mvp DESC, pms.kills DESC, p.name COLLATE NOCASE
-                """,
-                (match["id"],),
-            ).fetchall()
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT p.name, pms.kills, pms.is_mvp
+                    FROM player_match_stats pms
+                    JOIN players p ON p.id = pms.player_id
+                    WHERE pms.match_id = %s
+                    ORDER BY pms.is_mvp DESC, pms.kills DESC, lower(p.name)
+                    """,
+                    (match["id"],),
+                )
+                rows = cursor.fetchall()
 
         lines = [f"Match #{match['id']} recorded at {match['played_at']}"]
         if match["note"]:

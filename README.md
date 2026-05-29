@@ -19,7 +19,7 @@ Discord bot for tracking scrim performance:
 
 1. Create and activate a virtual environment.
 2. Install dependencies with `pip install -r requirements.txt`.
-3. Copy `.env.example` to `.env` and fill in your Discord token.
+3. Copy `.env.example` to `.env` and fill in your Discord token and PostgreSQL URL.
 4. Run `python src/main.py`.
 
 ## Entry format
@@ -32,12 +32,42 @@ The bot will create missing players automatically.
 
 ## Raspberry Pi deployment
 
-1. Install Raspberry Pi OS Lite, then install `python3`, `python3-venv`, `python3-pip`, and `git`.
-2. Clone this repo into a folder like `/opt/stats-bot`.
-3. Create a virtual environment and install `requirements.txt`.
-4. Create a `.env` file on the Pi with the token and optional guild ID.
-5. Run the bot once manually to confirm it logs in.
-6. Install a systemd service so the bot restarts on boot.
+1. Install Raspberry Pi OS Lite, then install `python3`, `python3-venv`, `python3-pip`, `git`, and PostgreSQL.
+2. Create the PostgreSQL database and user on the Pi.
+3. Clone this repo into a folder like `/opt/stats-bot`.
+4. Create a virtual environment and install `requirements.txt`.
+5. Create a `.env` file on the Pi with the token, optional guild ID, and `DATABASE_URL`.
+6. Run the bot once manually to confirm it logs in and creates tables.
+7. Install a systemd service so the bot restarts on boot.
+
+## PostgreSQL setup on the Pi
+
+Use a local PostgreSQL database if the Pi is hosting the data itself:
+
+```bash
+sudo apt update
+sudo apt install postgresql postgresql-contrib
+sudo systemctl enable postgresql
+sudo systemctl start postgresql
+sudo -u postgres psql
+```
+
+Inside `psql`, create the bot user and database:
+
+```sql
+CREATE USER stats_bot WITH PASSWORD 'change-this-password';
+CREATE DATABASE stats_bot OWNER stats_bot;
+GRANT ALL PRIVILEGES ON DATABASE stats_bot TO stats_bot;
+\q
+```
+
+Then set the connection string in `.env`:
+
+```env
+DATABASE_URL=postgresql://stats_bot:change-this-password@localhost:5432/stats_bot
+```
+
+If you already have a remote PostgreSQL server, use its host instead of `localhost`.
 
 ## systemd service example
 

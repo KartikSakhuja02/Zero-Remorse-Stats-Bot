@@ -9,7 +9,7 @@ from pathlib import Path
 class Settings:
     token: str
     guild_id: int | None
-    database_path: Path
+    database_url: str
     log_level: str
 
 
@@ -23,13 +23,16 @@ def load_settings() -> Settings:
     guild_id_raw = os.getenv("DISCORD_GUILD_ID", "").strip()
     guild_id = int(guild_id_raw) if guild_id_raw else None
 
-    database_path = Path(os.getenv("DATABASE_PATH", "data/stats_bot.sqlite3")).expanduser()
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is not set")
+
     log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
 
     return Settings(
         token=token,
         guild_id=guild_id,
-        database_path=database_path,
+        database_url=database_url,
         log_level=log_level,
     )
 
