@@ -30,7 +30,11 @@ class StatsCog(commands.Cog):
         with self.database.connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO players (name) VALUES (%s) ON CONFLICT (name) DO NOTHING",
+                    """
+                    INSERT INTO player_stats (player_name)
+                    VALUES (%s)
+                    ON CONFLICT (player_name) DO NOTHING
+                    """,
                     (normalized,),
                 )
 
@@ -55,35 +59,23 @@ class StatsCog(commands.Cog):
 
         with self.database.connect() as connection:
             with connection.cursor() as cursor:
-                cursor.execute("INSERT INTO matches (note) VALUES (%s) RETURNING id", (note,))
-                match_id = cursor.fetchone()["id"]
-
-            for entry in parsed_entries:
-                with connection.cursor() as cursor:
-                    cursor.execute("SELECT id FROM players WHERE name = %s", (entry.name,))
-                    player_row = cursor.fetchone()
-
-                if player_row is None:
-                    with connection.cursor() as cursor:
-                        cursor.execute(
-                            "INSERT INTO players (name) VALUES (%s) RETURNING id",
-                            (entry.name,),
-                        )
-                        player_id = cursor.fetchone()["id"]
-                else:
-                    player_id = player_row["id"]
-
-                with connection.cursor() as cursor:
+                for entry in parsed_entries:
                     cursor.execute(
                         """
-                        INSERT INTO player_match_stats (match_id, player_id, kills, is_mvp)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO player_stats (player_name, matches, mvp, kills)
+                        VALUES (%s, 1, %s, %s)
+                        ON CONFLICT (player_name) DO UPDATE
+                        SET
+                            matches = player_stats.matches + 1,
+                            mvp = player_stats.mvp + EXCLUDED.mvp,
+                            kills = player_stats.kills + EXCLUDED.kills,
+                            updated_at = NOW()
                         """,
-                        (match_id, player_id, entry.kills, int(entry.is_mvp)),
+                        (entry.name, int(entry.is_mvp), entry.kills),
                     )
 
         summary_lines = [
-            f"Recorded match #{match_id} with {len(parsed_entries)} players.",
+            f"Recorded match totals for {len(parsed_entries)} players.",
             *[
                 f"{entry.name}: {entry.kills} kills{' and MVP' if entry.is_mvp else ''}"
                 for entry in parsed_entries
@@ -103,14 +95,13 @@ class StatsCog(commands.Cog):
                 cursor.execute(
                     """
                     SELECT
-                        p.name,
-                        COUNT(pms.id) AS matches,
-                        COALESCE(SUM(pms.kills), 0) AS kills,
-                        COALESCE(SUM(pms.is_mvp), 0) AS mvps
-                    FROM players p
-                    LEFT JOIN player_match_stats pms ON pms.player_id = p.id
-                    WHERE p.name = %s
-                    GROUP BY p.id
+                        player_name,
+                        matches,
+                        mvp,
+                        kills,
+                        kill_per_match
+                    FROM player_stats
+                    WHERE player_name = %s
                     """,
                     (normalized,),
                 )
@@ -120,16 +111,11 @@ class StatsCog(commands.Cog):
             await interaction.response.send_message(f"No stats found for {normalized}.", ephemeral=True)
             return
 
-        matches = int(row["matches"])
-        kills = int(row["kills"])
-        mvps = int(row["mvps"])
-        km = kills / matches if matches else 0.0
-
-        embed = discord.Embed(title=f"Stats for {row['name']}", color=discord.Color.blurple())
-        embed.add_field(name="Matches", value=str(matches), inline=True)
-        embed.add_field(name="MVP", value=str(mvps), inline=True)
-        embed.add_field(name="Kills", value=str(kills), inline=True)
-        embed.add_field(name="K/M", value=f"{km:.2f}", inline=True)
+        embed = discord.Embed(title=f"Stats for {row['player_name']}", color=discord.Color.blurple())
+        embed.add_field(name="Matches", value=str(int(row["matches"])), inline=True)
+        embed.add_field(name="MVP", value=str(int(row["mvp"])), inline=True)
+        embed.add_field(name="Kills", value=str(int(row["kills"])), inline=True)
+        embed.add_field(name="K/M", value=f"{float(row['kill_per_match']):.2f}", inline=True)
 
         await interaction.response.send_message(embed=embed)
 
@@ -139,9 +125,9 @@ class StatsCog(commands.Cog):
         sort_key = sort_by.strip().lower()
         sort_map = {
             "kills": "kills DESC",
-            "mvps": "mvps DESC, kills DESC",
+            "mvps": "mvp DESC, kills DESC",
             "matches": "matches DESC, kills DESC",
-            "km": "km DESC, kills DESC",
+            "km": "kill_per_match DESC, kills DESC",
         }
         order_clause = sort_map.get(sort_key)
         if order_clause is None:
@@ -156,18 +142,13 @@ class StatsCog(commands.Cog):
                 cursor.execute(
                     f"""
                     SELECT
-                        p.name,
-                        COUNT(pms.id) AS matches,
-                        COALESCE(SUM(pms.kills), 0) AS kills,
-                        COALESCE(SUM(pms.is_mvp), 0) AS mvps,
-                        CASE
-                            WHEN COUNT(pms.id) = 0 THEN 0.0
-                            ELSE CAST(SUM(pms.kills) AS DOUBLE PRECISION) / COUNT(pms.id)
-                        END AS km
-                    FROM players p
-                    LEFT JOIN player_match_stats pms ON pms.player_id = p.id
-                    GROUP BY p.id
-                    ORDER BY {order_clause}, lower(p.name)
+                        player_name,
+                        matches,
+                        mvp,
+                        kills,
+                        kill_per_match
+                    FROM player_stats
+                    ORDER BY {order_clause}, lower(player_name)
                     LIMIT 10
                     """
                 )
@@ -180,43 +161,17 @@ class StatsCog(commands.Cog):
         lines = [f"Top players by {sort_key}:"]
         for index, row in enumerate(rows, start=1):
             lines.append(
-                f"{index}. {row['name']} - matches {int(row['matches'])}, mvps {int(row['mvps'])}, kills {int(row['kills'])}, km {float(row['km']):.2f}"
+                f"{index}. {row['player_name']} - matches {int(row['matches'])}, mvps {int(row['mvp'])}, kills {int(row['kills'])}, km {float(row['kill_per_match']):.2f}"
             )
 
         await interaction.response.send_message("\n".join(lines))
 
     @stats.command(name="recent", description="Show the latest recorded match")
     async def recent_match(self, interaction: discord.Interaction) -> None:
-        with self.database.connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT id, played_at, note FROM matches ORDER BY id DESC LIMIT 1")
-                match = cursor.fetchone()
-
-            if match is None:
-                await interaction.response.send_message("No matches recorded yet.", ephemeral=True)
-                return
-
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT p.name, pms.kills, pms.is_mvp
-                    FROM player_match_stats pms
-                    JOIN players p ON p.id = pms.player_id
-                    WHERE pms.match_id = %s
-                    ORDER BY pms.is_mvp DESC, pms.kills DESC, lower(p.name)
-                    """,
-                    (match["id"],),
-                )
-                rows = cursor.fetchall()
-
-        lines = [f"Match #{match['id']} recorded at {match['played_at']}"]
-        if match["note"]:
-            lines.append(f"Note: {match['note']}")
-        for row in rows:
-            marker = " MVP" if row["is_mvp"] else ""
-            lines.append(f"{row['name']}: {int(row['kills'])} kills{marker}")
-
-        await interaction.response.send_message("\n".join(lines))
+        await interaction.response.send_message(
+            "This version stores aggregate player totals only, so individual match history is not tracked.",
+            ephemeral=True,
+        )
 
     async def cog_load(self) -> None:
         self.bot.tree.add_command(self.stats)

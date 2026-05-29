@@ -2,10 +2,11 @@
 
 Discord bot for tracking scrim performance:
 
-- matches played
+- player_name
+- matches
 - MVP count
 - total kills
-- kills per match (K/M)
+- kill per match (K/M)
 
 ## Commands
 
@@ -14,6 +15,8 @@ Discord bot for tracking scrim performance:
 - `/stats leaderboard sort_by:<kills|mvps|matches|km>`
 - `/stats recent`
 - `/add_player name:<player name>`
+
+This version stores one aggregate row per player. Each recorded match updates that player's totals.
 
 ## Local setup
 
