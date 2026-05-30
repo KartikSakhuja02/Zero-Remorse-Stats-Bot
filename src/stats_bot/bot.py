@@ -27,6 +27,10 @@ class ScrimBot(commands.Bot):
         await self.add_cog(StatsCog(self, self.database))
         await self.add_cog(ProfileCog(self, self.database, self.settings))
 
+        profile_cog = self.get_cog("ProfileCog")
+        if profile_cog is not None:
+            self.add_view(profile_cog.create_card_view())
+
         if self.guild_id is not None:
             guild = discord.Object(id=self.guild_id)
             self.tree.copy_global_to(guild=guild)

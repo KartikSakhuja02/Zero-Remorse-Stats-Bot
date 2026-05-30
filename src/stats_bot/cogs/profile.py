@@ -52,6 +52,54 @@ class ProfileReviewView(discord.ui.View):
         await self.cog.handle_profile_decision(interaction, self.submission_id, self.player_name, approved=False)
 
 
+class ProfileCardView(discord.ui.View):
+    def __init__(self, cog: "ProfileCog") -> None:
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, custom_id="profile_card_refresh")
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        profile_name = self._extract_profile_name(interaction)
+        if profile_name is None:
+            await interaction.response.send_message("I could not tell which profile this is.", ephemeral=True)
+            return
+
+        refreshed = await self.cog.refresh_profile_card_for_player(profile_name)
+        if refreshed is None:
+            await interaction.response.send_message("That profile is not registered yet.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(f"Refreshed profile for {profile_name}.", ephemeral=True)
+
+    @discord.ui.button(label="Screenshot", style=discord.ButtonStyle.primary, custom_id="profile_card_screenshot")
+    async def screenshot(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        message = interaction.message
+        if message is None or not message.attachments:
+            await interaction.response.send_message("No screenshot is attached to this profile post.", ephemeral=True)
+            return
+
+        attachment = message.attachments[0]
+        embed = discord.Embed(title="Profile Screenshot", color=discord.Color.blurple())
+        embed.set_image(url=attachment.url)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @staticmethod
+    def _extract_profile_name(interaction: discord.Interaction) -> str | None:
+        message = interaction.message
+        if message is None or not message.embeds:
+            return None
+
+        embed = message.embeds[0]
+        if not embed.title:
+            return None
+
+        prefix = "Profile Card - "
+        if not embed.title.startswith(prefix):
+            return None
+
+        return embed.title[len(prefix) :].strip() or None
+
+
 class ProfileCog(commands.Cog):
     def __init__(self, bot: commands.Bot, database: Database, settings: Any) -> None:
         self.bot = bot
@@ -71,6 +119,9 @@ class ProfileCog(commands.Cog):
                 app_name=settings.openrouter_app_name,
                 site_url=settings.openrouter_site_url,
             )
+
+    def create_card_view(self) -> ProfileCardView:
+        return ProfileCardView(self)
 
     @app_commands.command(name="profile_setup", description="Post the profile submission instructions in the submission channel")
     async def profile_setup(self, interaction: discord.Interaction) -> None:
@@ -239,8 +290,8 @@ class ProfileCog(commands.Cog):
         elif not create_if_missing:
             return True
 
-        content, file = self._build_profile_card(profile)
-        kwargs: dict[str, Any] = {"content": content}
+        embed, file = self._build_profile_card(profile)
+        kwargs: dict[str, Any] = {"embed": embed, "view": self.create_card_view()}
         if file is not None:
             kwargs["file"] = file
 
@@ -265,8 +316,8 @@ class ProfileCog(commands.Cog):
             old_message = await channel.fetch_message(page_state["message_id"])
             await old_message.delete()
 
-        content, file = self._build_profile_card(profile)
-        kwargs: dict[str, Any] = {"content": content}
+        embed, file = self._build_profile_card(profile)
+        kwargs: dict[str, Any] = {"embed": embed, "view": self.create_card_view()}
         if file is not None:
             kwargs["file"] = file
 
@@ -496,6 +547,12 @@ class ProfileCog(commands.Cog):
                 return
             channel = fetched_channel
 
+        guild = channel.guild
+        bot_member = guild.get_member(self.bot.user.id) if guild is not None and self.bot.user is not None else None
+        if bot_member is not None and not channel.permissions_for(bot_member).manage_messages:
+            logger.warning("Bot is missing Manage Messages in #%s, so it cannot delete submission message %s", channel.name, message_id)
+            return
+
         try:
             message = await channel.fetch_message(message_id)
             await message.delete()
@@ -533,22 +590,28 @@ class ProfileCog(commands.Cog):
         file_path = self.screenshot_dir / f"{message_id}_{safe_name}{suffix}"
         return await self._save_attachment_to_disk(attachment, file_path)
 
-    def _build_profile_card(self, profile: dict[str, Any]) -> tuple[str, discord.File | None]:
-        return self._build_profile_content(profile), self._build_profile_attachment(profile)
+    def _build_profile_card(self, profile: dict[str, Any]) -> tuple[discord.Embed, discord.File | None]:
+        embed = discord.Embed(
+            title=f"Profile Card - {profile['player_name']}",
+            color=discord.Color.teal(),
+            description="Live profile snapshot with the submitted screenshot attached.",
+        )
+        embed.add_field(name="Discord", value=f"<@{profile['discord_user_id']}>" if profile["discord_user_id"] else "Not linked", inline=True)
+        embed.add_field(name="Matches", value=str(int(profile["matches"])), inline=True)
+        embed.add_field(name="MVP", value=str(int(profile["mvp"])), inline=True)
+        embed.add_field(name="Kills", value=str(int(profile["kills"])), inline=True)
+        embed.add_field(name="K/M", value=f"{float(profile['kill_per_match']):.2f}", inline=True)
 
-    def _build_profile_content(self, profile: dict[str, Any]) -> str:
-        lines = [
-            f"**Profile**: {profile['player_name']}",
-            f"**Discord**: <@{profile['discord_user_id']}>" if profile["discord_user_id"] else "**Discord**: Not linked",
-            f"**Matches**: {int(profile['matches'])}",
-            f"**MVP**: {int(profile['mvp'])}",
-            f"**Kills**: {int(profile['kills'])}",
-            f"**K/M**: {float(profile['kill_per_match']):.2f}",
-        ]
         if profile["ocr_text"]:
-            lines.append(f"**OCR**: {self._truncate_text(profile['ocr_text'], 180)}")
+            embed.add_field(name="OCR", value=self._truncate_text(profile["ocr_text"], 900), inline=False)
 
-        return "\n".join(lines)
+        embed.set_footer(text="Updated when scrim results are submitted")
+
+        screenshot_file = self._build_profile_attachment(profile)
+        if screenshot_file is not None:
+            embed.set_image(url=f"attachment://{screenshot_file.filename}")
+
+        return embed, screenshot_file
 
     def _build_profile_attachment(self, profile: dict[str, Any]) -> discord.File | None:
         screenshot_path = profile["screenshot_path"]
