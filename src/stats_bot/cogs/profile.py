@@ -170,6 +170,36 @@ class ProfileCog(commands.Cog):
 
         await interaction.followup.send(f"Updated profile card for {member.mention}.", ephemeral=True)
 
+    @app_commands.command(name="trn", description="Link your Discord account to your Tracker IGN")
+    @app_commands.describe(myign="Your Tracker IGN")
+    async def trn(self, interaction: discord.Interaction, myign: str) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        normalized_ign = self._normalize_name(myign)
+        if not normalized_ign:
+            await interaction.followup.send("Please provide a valid IGN.", ephemeral=True)
+            return
+
+        linked_name = normalized_ign
+        if self.tracker_client is not None:
+            try:
+                tracker_profile = await self.tracker_client.fetch_profile(normalized_ign)
+                linked_name = tracker_profile.display_name or normalized_ign
+            except Exception:
+                logger.exception("Tracker lookup failed for %s", normalized_ign)
+
+        self._link_discord_user_to_profile(linked_name, interaction.user.id)
+
+        refreshed = await self.refresh_profile_card(interaction.user.id, create_if_missing=True)
+        if refreshed is None:
+            await interaction.followup.send(
+                f"Linked your Discord account to {linked_name}, but I could not post the profile card because the stats channel is not configured.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(f"Linked your Discord account to {linked_name}.", ephemeral=True)
+
     async def refresh_profile_announcement(self, channel: discord.TextChannel | None = None) -> None:
         if self.settings.profile_submission_channel_id is None:
             return
@@ -483,12 +513,47 @@ class ProfileCog(commands.Cog):
                     SELECT player_name, matches, mvp, kills, kill_per_match, discord_user_id, screenshot_path, ocr_text
                     FROM player_stats
                     WHERE discord_user_id = %s
+                    ORDER BY updated_at DESC, player_name ASC
+                    LIMIT 1
                     """,
                     (discord_user_id,),
                 )
                 row = cursor.fetchone()
 
         return row
+
+    def _link_discord_user_to_profile(self, player_name: str, discord_user_id: int) -> None:
+        with self.database.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE player_stats
+                    SET discord_user_id = NULL,
+                        updated_at = NOW()
+                    WHERE discord_user_id = %s
+                      AND player_name <> %s
+                    """,
+                    (discord_user_id, player_name),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO player_stats (
+                        player_name,
+                        matches,
+                        mvp,
+                        kills,
+                        discord_user_id,
+                        registered_at,
+                        updated_at
+                    )
+                    VALUES (%s, 0, 0, 0, %s, NOW(), NOW())
+                    ON CONFLICT (player_name) DO UPDATE
+                    SET discord_user_id = EXCLUDED.discord_user_id,
+                        registered_at = COALESCE(player_stats.registered_at, NOW()),
+                        updated_at = NOW()
+                    """,
+                    (player_name, discord_user_id),
+                )
 
     def _get_profile_by_name(self, player_name: str) -> dict[str, Any] | None:
         with self.database.connect() as connection:
