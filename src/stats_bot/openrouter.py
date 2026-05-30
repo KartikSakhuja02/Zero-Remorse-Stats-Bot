@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
 
 import aiohttp
@@ -52,6 +53,100 @@ class OpenRouterOCRClient:
             raise RuntimeError(f"Could not extract kills from OCR output: {content}")
 
         return int(match.group(0))
+
+    async def extract_match_rows(
+        self,
+        image_bytes: bytes,
+        kills_symbol_label: str = "kills",
+        score_symbol_label: str = "score",
+        mime_type: str = "image/png",
+    ) -> list[dict]:
+        """
+        Extracts scoreboard rows from a Rainbow Six Mobile match screenshot.
+
+        The method asks the OCR model to return a JSON array of objects with the
+        fields: team ('your'|'enemy'), player (string), kills (int), score (int).
+        This allows downstream code to pick kills under the kills-symbol and
+        scores under the score-symbol and compute MVPs by highest score.
+        """
+        system_prompt = (
+            "You are OCR for a Rainbow Six Mobile match screenshot.\n"
+            "Locate the scoreboard table and return ONLY a JSON array (no extra text). "
+            "Each item must have the keys: 'team' (either 'your' or 'enemy'), 'player' (string), 'kills' (int), 'score' (int).\n"
+            "Use numeric values for kills and score. Do not include any other keys.\n"
+            "If you are unsure about a value, return null for that field. "
+        )
+
+        user_prompt = (
+            f"Identify the player rows and the numeric values under the columns for the {kills_symbol_label} and {score_symbol_label} symbols. "
+            "Output a JSON array like: [{" + "\"team\": \"your\", \"player\": \"Name\", \"kills\": 8, \"score\": 3235}, ...]."
+        )
+
+        content = await self._chat_completion_text(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+
+        cleaned = self._clean_extracted_text(content)
+
+        # Some models may still include trailing commentary; attempt to find JSON
+        try:
+            obj_start = cleaned.index("[")
+            obj_text = cleaned[obj_start:]
+        except ValueError:
+            obj_text = cleaned
+
+        try:
+            data = json.loads(obj_text)
+        except Exception:
+            # As a fallback, try to extract lines like: Player | kills | score
+            rows: list[dict] = []
+            for line in obj_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # try to capture: name <sep> kills <sep> score
+                parts = re.split(r"\s*[\|,;]\s*|\s{2,}", line)
+                if len(parts) >= 3:
+                    name = parts[0].strip()
+                    kills_match = re.search(r"-?\d+", parts[1])
+                    score_match = re.search(r"-?\d+", parts[2])
+                    try:
+                        kills = int(kills_match.group(0)) if kills_match else None
+                        score = int(score_match.group(0)) if score_match else None
+                    except Exception:
+                        kills = None
+                        score = None
+                    # Heuristics: assume left column is 'your' until we see a separator
+                    rows.append({"team": "your", "player": name, "kills": kills, "score": score})
+
+            return rows
+
+        # Normalize and ensure integer types
+        parsed: list[dict] = []
+        for item in data:
+            try:
+                team = (item.get("team") or "your").lower()
+                player = (item.get("player") or "").strip()
+                kills = item.get("kills")
+                score = item.get("score")
+                if isinstance(kills, (int, float)):
+                    kills = int(kills)
+                else:
+                    kills = None if kills is None else int(re.search(r"-?\d+", str(kills)).group(0))
+
+                if isinstance(score, (int, float)):
+                    score = int(score)
+                else:
+                    score = None if score is None else int(re.search(r"-?\d+", str(score)).group(0))
+
+                parsed.append({"team": team, "player": player, "kills": kills, "score": score})
+            except Exception:
+                continue
+
+        return parsed
 
     async def _chat_completion_text(self, *, image_bytes: bytes, mime_type: str, system_prompt: str, user_prompt: str) -> str:
         data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"

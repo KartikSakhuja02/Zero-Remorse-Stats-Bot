@@ -215,26 +215,66 @@ class ProfileCog(commands.Cog):
             await interaction.followup.send("Attach at least one screenshot.", ephemeral=True)
             return
 
-        kills_by_screenshot: list[tuple[str, int]] = []
+        per_shot: list[dict] = []
         total_kills = 0
+        total_mvps = 0
+
         for attachment in attachments:
             image_bytes = await attachment.read()
-            kills = await self.ocr_client.extract_kills_for_player(
-                image_bytes,
-                profile["player_name"],
-                attachment.content_type or "image/png",
-            )
-            kills_by_screenshot.append((attachment.filename, kills))
-            total_kills += kills
+            try:
+                rows = await self.ocr_client.extract_match_rows(
+                    image_bytes,
+                    mime_type=attachment.content_type or "image/png",
+                )
+            except Exception as exc:
+                logger.exception("OCR extraction failed for %s: %s", attachment.filename, exc)
+                await interaction.followup.send(f"I could not OCR {attachment.filename}: {exc}", ephemeral=True)
+                return
 
-        self._apply_match_submission(profile["player_name"], interaction.user.id, len(attachments), total_kills)
+            # Normalize player names and try to find the registered player
+            normalized_target = self._normalize_name(profile["player_name"]).lower()
+            matched_row = None
+            for r in rows:
+                if not r.get("player"):
+                    continue
+                if self._normalize_name(r["player"]).lower() == normalized_target:
+                    matched_row = r
+                    break
+
+            if matched_row is None:
+                await interaction.followup.send(
+                    f"Could not find your name {profile['player_name']} in {attachment.filename}. Aborting.",
+                    ephemeral=True,
+                )
+                return
+
+            kills = matched_row.get("kills") or 0
+            score = matched_row.get("score")
+            per_shot.append({"filename": attachment.filename, "kills": kills, "score": score, "team": matched_row.get("team")})
+            total_kills += int(kills or 0)
+
+            # Determine MVP for that team by highest score
+            try:
+                team = matched_row.get("team") or "your"
+                team_scores = [r.get("score") for r in rows if r.get("team") == team and r.get("score") is not None]
+                if team_scores:
+                    max_score = max(team_scores)
+                    if score is not None and int(score) >= int(max_score):
+                        total_mvps += 1
+            except Exception:
+                # Non-fatal: don't award MVP if we cannot compute
+                logger.exception("Failed to compute MVP for %s in %s", profile["player_name"], attachment.filename)
+
+        # Apply DB updates (matches, kills, mvps) atomically
+        try:
+            self._apply_match_submission_with_mvp(profile["player_name"], interaction.user.id, len(attachments), total_kills, total_mvps)
+        except Exception:
+            logger.exception("Failed to update DB for submission by %s", interaction.user.id)
+            await interaction.followup.send("Failed to update the database. Try again or contact an admin.", ephemeral=True)
+            return
 
         refreshed = await self.refresh_profile_card(interaction.user.id, create_if_missing=True)
-        lines = [
-            f"Updated {profile['player_name']} from {len(attachments)} screenshot(s).",
-            *[f"{filename}: {kills} kills" for filename, kills in kills_by_screenshot],
-            f"Total kills added: {total_kills}",
-        ]
+        lines = [f"Updated {profile['player_name']} from {len(attachments)} screenshot(s).", *[f"{p['filename']}: {p['kills']} kills (score: {p['score']})" for p in per_shot], f"Total kills added: {total_kills}", f"MVPs added: {total_mvps}"]
         if refreshed is None:
             lines.append("I updated the database, but I could not refresh the profile card because the stats channel is not configured.")
 
@@ -676,6 +716,31 @@ class ProfileCog(commands.Cog):
                         updated_at = NOW()
                     """,
                     (player_name, matches_added, kills_added, discord_user_id, player_name),
+                )
+
+    def _apply_match_submission_with_mvp(self, player_name: str, discord_user_id: int, matches_added: int, kills_added: int, mvps_added: int) -> None:
+        with self.database.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO player_stats (
+                        player_name,
+                        matches,
+                        mvp,
+                        kills,
+                        discord_user_id,
+                        registered_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, COALESCE((SELECT registered_at FROM player_stats WHERE player_name = %s), NOW()), NOW())
+                    ON CONFLICT (player_name) DO UPDATE
+                    SET matches = player_stats.matches + EXCLUDED.matches,
+                        kills = player_stats.kills + EXCLUDED.kills,
+                        mvp = player_stats.mvp + EXCLUDED.mvp,
+                        discord_user_id = EXCLUDED.discord_user_id,
+                        updated_at = NOW()
+                    """,
+                    (player_name, matches_added, mvps_added, kills_added, discord_user_id, player_name),
                 )
 
     def _get_profile_by_name(self, player_name: str) -> dict[str, Any] | None:
