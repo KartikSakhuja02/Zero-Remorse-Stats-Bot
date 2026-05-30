@@ -314,7 +314,7 @@ class ProfileCog(commands.Cog):
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT id, discord_user_id, local_path, ocr_text, player_name, status
+                    SELECT id, discord_user_id, source_channel_id, source_message_id, local_path, ocr_text, player_name, status
                     FROM profile_submissions
                     WHERE id = %s
                     """,
@@ -605,22 +605,9 @@ class ProfileCog(commands.Cog):
         self._rounded_panel(draw, ocr_box, radius=20, fill=(12, 17, 24, 255), outline=(60, 74, 92, 255))
         self._draw_multiline_text_box(draw, (520, 648), self._truncate_text(ocr_text, 180), mono_font, (233, 239, 245, 255), 720)
 
-        screenshot_image = self._load_screenshot_image(screenshot_path)
-        if screenshot_image is not None:
-            screenshot_image = screenshot_image.convert("RGBA")
-            screenshot_image.thumbnail((290, 360), Image.Resampling.LANCZOS)
-            frame_w, frame_h = 320, 420
-            frame_x, frame_y = 90, 300
-            self._rounded_panel(draw, (frame_x, frame_y, frame_x + frame_w, frame_y + frame_h), radius=24, fill=(10, 14, 20, 255), outline=(82, 97, 118, 255))
-            image_x = frame_x + (frame_w - screenshot_image.width) // 2
-            image_y = frame_y + (frame_h - screenshot_image.height) // 2
-            background.paste(screenshot_image, (image_x, image_y), screenshot_image)
-        else:
-            self._rounded_panel(draw, (90, 300, 410, 720), radius=24, fill=(10, 14, 20, 255), outline=(82, 97, 118, 255))
-            draw.text((145, 490), "NO SCREENSHOT", font=subtitle_font, fill=(160, 174, 191, 255))
+        self._draw_screenshot_panel(background, screenshot_path)
 
-        footer = f"Profile generated for {player_name} | updated live when scrim results are submitted"
-        draw.text((500, 732), footer, font=small_font, fill=(146, 158, 174, 255))
+        self._draw_footer(draw, player_name, small_font)
 
         output = BytesIO()
         background = background.convert("RGB")
@@ -724,16 +711,34 @@ class ProfileCog(commands.Cog):
         for index, line in enumerate(lines[:4]):
             draw.text((x, y + index * 24), line, font=font, fill=fill)
 
+    def _draw_screenshot_panel(self, background: Image.Image, screenshot_path: str | None) -> None:
+        draw = ImageDraw.Draw(background)
+        subtitle_font = self._load_font(22)
+
+        screenshot_image = self._load_screenshot_image(screenshot_path)
+        if screenshot_image is None:
+            self._rounded_panel(draw, (90, 300, 410, 720), radius=24, fill=(10, 14, 20, 255), outline=(82, 97, 118, 255))
+            draw.text((145, 490), "NO SCREENSHOT", font=subtitle_font, fill=(160, 174, 191, 255))
+            return
+
+        screenshot_image = screenshot_image.convert("RGBA")
+        screenshot_image.thumbnail((290, 360), Image.Resampling.LANCZOS)
+        frame_w, frame_h = 320, 420
+        frame_x, frame_y = 90, 300
+        self._rounded_panel(draw, (frame_x, frame_y, frame_x + frame_w, frame_y + frame_h), radius=24, fill=(10, 14, 20, 255), outline=(82, 97, 118, 255))
+        image_x = frame_x + (frame_w - screenshot_image.width) // 2
+        image_y = frame_y + (frame_h - screenshot_image.height) // 2
+        background.paste(screenshot_image, (image_x, image_y), screenshot_image)
+
+    @staticmethod
+    def _draw_footer(draw: ImageDraw.ImageDraw, player_name: str, font: ImageFont.ImageFont) -> None:
+        footer = f"Profile generated for {player_name} | updated live when scrim results are submitted"
+        draw.text((500, 732), footer, font=font, fill=(146, 158, 174, 255))
+
     @staticmethod
     def _load_screenshot_image(screenshot_path: str | None) -> Image.Image | None:
-        if not screenshot_path:
-            return None
-
-        file_path = Path(screenshot_path)
-        if not file_path.exists():
-            return None
-
-        return Image.open(file_path)
+        file_path = Path(screenshot_path) if screenshot_path else None
+        return Image.open(file_path) if file_path is not None and file_path.exists() else None
 
     @staticmethod
     def _truncate_text(text: str, limit: int = 1024) -> str:
