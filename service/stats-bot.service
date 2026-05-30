@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/stats-bot
-EnvironmentFile=/opt/stats-bot/.env
-ExecStart=/opt/stats-bot/.venv/bin/python /opt/stats-bot/src/main.py
+WorkingDirectory=/home/kartiksakhuja02/Documents/Zero-Remorse-Stats-Bot
+EnvironmentFile=/home/kartiksakhuja02/Documents/Zero-Remorse-Stats-Bot/.env
+ExecStart=/home/kartiksakhuja02/Documents/Zero-Remorse-Stats-Bot/.venv/bin/python /home/kartiksakhuja02/Documents/Zero-Remorse-Stats-Bot/src/main.py
 Restart=always
 RestartSec=10
-User=pi
+User=kartiksakhuja02
 
 [Install]
 WantedBy=multi-user.target
