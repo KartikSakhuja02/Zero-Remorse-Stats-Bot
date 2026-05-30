@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 import logging
 from typing import Any
@@ -10,7 +9,6 @@ from typing import Any
 import discord
 from discord import app_commands
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from ..db import Database
 from ..openrouter import OpenRouterOCRClient
@@ -241,8 +239,8 @@ class ProfileCog(commands.Cog):
         elif not create_if_missing:
             return True
 
-        embed, file = self._build_profile_card(profile)
-        kwargs: dict[str, Any] = {"embed": embed}
+        content, file = self._build_profile_card(profile)
+        kwargs: dict[str, Any] = {"content": content}
         if file is not None:
             kwargs["file"] = file
 
@@ -267,8 +265,8 @@ class ProfileCog(commands.Cog):
             old_message = await channel.fetch_message(page_state["message_id"])
             await old_message.delete()
 
-        embed, file = self._build_profile_card(profile)
-        kwargs: dict[str, Any] = {"embed": embed}
+        content, file = self._build_profile_card(profile)
+        kwargs: dict[str, Any] = {"content": content}
         if file is not None:
             kwargs["file"] = file
 
@@ -535,276 +533,33 @@ class ProfileCog(commands.Cog):
         file_path = self.screenshot_dir / f"{message_id}_{safe_name}{suffix}"
         return await self._save_attachment_to_disk(attachment, file_path)
 
-    def _build_profile_card(self, profile: dict[str, Any]) -> tuple[discord.Embed, discord.File | None]:
-        player_name = profile["player_name"]
-        matches = int(profile["matches"])
-        mvps = int(profile["mvp"])
-        kills = int(profile["kills"])
-        kill_per_match = float(profile["kill_per_match"])
-        discord_user_id = profile["discord_user_id"]
-        screenshot_path = profile["screenshot_path"]
-        ocr_text = profile["ocr_text"]
-        card_bytes = self._render_profile_card_image(
-            player_name=player_name,
-            discord_user_id=discord_user_id,
-            matches=matches,
-            mvps=mvps,
-            kills=kills,
-            kill_per_match=kill_per_match,
-            screenshot_path=screenshot_path,
-            ocr_text=ocr_text,
-        )
+    def _build_profile_card(self, profile: dict[str, Any]) -> tuple[str, discord.File | None]:
+        return self._build_profile_content(profile), self._build_profile_attachment(profile)
 
-        embed = discord.Embed(title=f"Profile Card - {player_name}", color=discord.Color.teal())
-        embed.set_image(url="attachment://profile-card.png")
-        file = discord.File(card_bytes, filename="profile-card.png")
-        return embed, file
-
-    def _render_profile_card_image(
-        self,
-        *,
-        player_name: str,
-        discord_user_id: int | None,
-        matches: int,
-        mvps: int,
-        kills: int,
-        kill_per_match: float,
-        screenshot_path: str | None,
-        ocr_text: str,
-    ) -> BytesIO:
-        width, height = 1400, 820
-        background = Image.new("RGBA", (width, height), (13, 17, 25, 255))
-        draw = ImageDraw.Draw(background)
-
-        self._draw_vertical_gradient(draw, width, height, (13, 17, 25), (23, 31, 45))
-        self._draw_glow(draw, width, height)
-
-        panel_color = (20, 27, 39, 240)
-        accent = (99, 230, 190, 255)
-        accent_soft = (72, 164, 141, 255)
-
-        self._rounded_panel(draw, (40, 40, 1360, 780), radius=36, fill=panel_color, outline=(55, 70, 90, 255))
-        self._rounded_panel(draw, (70, 90, 430, 750), radius=28, fill=(16, 22, 32, 255), outline=(70, 86, 106, 255))
-        self._rounded_panel(draw, (470, 90, 1320, 750), radius=28, fill=(18, 24, 35, 255), outline=(70, 86, 106, 255))
-
-        title_font = self._load_font(54, bold=True)
-        subtitle_font = self._load_font(22)
-        stat_label_font = self._load_font(20, bold=True)
-        stat_value_font = self._load_font(34, bold=True)
-        small_font = self._load_font(18)
-        mono_font = self._load_font(18)
-
-        self._draw_fitted_text(draw, (110, 112), player_name, title_font, (245, 249, 255, 255), 255)
-        draw.text((110, 175), f"Discord User: <@{discord_user_id}>" if discord_user_id else "Discord User: Not linked", font=subtitle_font, fill=(195, 206, 220, 255))
-        draw.rounded_rectangle((110, 220, 285, 262), radius=16, fill=accent)
-        draw.text((145, 228), "REGISTERED", font=self._load_font(18, bold=True), fill=(10, 18, 21, 255))
-
-        self._draw_metric_card(draw, 500, 120, 250, 132, "MATCHES", str(matches), accent_soft, stat_label_font, stat_value_font)
-        self._draw_metric_card(draw, 770, 120, 250, 132, "MVP", str(mvps), (214, 156, 72, 255), stat_label_font, stat_value_font)
-        self._draw_metric_card(draw, 1040, 120, 250, 132, "KILLS", str(kills), (108, 168, 255, 255), stat_label_font, stat_value_font)
-
-        self._draw_metric_card(draw, 500, 280, 790, 124, "K/M", f"{kill_per_match:.2f}", (163, 117, 255, 255), stat_label_font, stat_value_font)
-
-        self._draw_table_header(draw, 500, 462, 790, 34, (159, 173, 191, 255), small_font)
-        self._draw_table_row(draw, 500, 502, 790, 62, player_name, matches, mvps, kills, kill_per_match, (245, 249, 255, 255), mono_font)
-
-        draw.text((500, 586), "OCR TEXT", font=self._load_font(24, bold=True), fill=(159, 173, 191, 255))
-        ocr_box = (500, 622, 1260, 704)
-        self._rounded_panel(draw, ocr_box, radius=20, fill=(12, 17, 24, 255), outline=(60, 74, 92, 255))
-        self._draw_multiline_text_box(draw, (520, 642), self._truncate_text(ocr_text, 120), mono_font, (233, 239, 245, 255), 680, max_lines=2)
-
-        self._draw_screenshot_panel(background, screenshot_path)
-
-        self._draw_footer(draw, player_name, small_font)
-
-        output = BytesIO()
-        background = background.convert("RGB")
-        background.save(output, format="PNG", optimize=True)
-        output.seek(0)
-        return output
-
-    @staticmethod
-    def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-        font_candidates = [
-            "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
-            "arialbd.ttf" if bold else "arial.ttf",
+    def _build_profile_content(self, profile: dict[str, Any]) -> str:
+        lines = [
+            f"**Profile**: {profile['player_name']}",
+            f"**Discord**: <@{profile['discord_user_id']}>" if profile["discord_user_id"] else "**Discord**: Not linked",
+            f"**Matches**: {int(profile['matches'])}",
+            f"**MVP**: {int(profile['mvp'])}",
+            f"**Kills**: {int(profile['kills'])}",
+            f"**K/M**: {float(profile['kill_per_match']):.2f}",
         ]
-        for candidate in font_candidates:
-            try:
-                return ImageFont.truetype(candidate, size=size)
-            except OSError:
-                continue
-        return ImageFont.load_default()
+        if profile["ocr_text"]:
+            lines.append(f"**OCR**: {self._truncate_text(profile['ocr_text'], 180)}")
 
-    @staticmethod
-    def _draw_vertical_gradient(draw: ImageDraw.ImageDraw, width: int, height: int, top_rgb: tuple[int, int, int], bottom_rgb: tuple[int, int, int]) -> None:
-        for y in range(height):
-            ratio = y / max(height - 1, 1)
-            red = int(top_rgb[0] * (1 - ratio) + bottom_rgb[0] * ratio)
-            green = int(top_rgb[1] * (1 - ratio) + bottom_rgb[1] * ratio)
-            blue = int(top_rgb[2] * (1 - ratio) + bottom_rgb[2] * ratio)
-            draw.line((0, y, width, y), fill=(red, green, blue, 255))
+        return "\n".join(lines)
 
-    @staticmethod
-    def _draw_glow(draw: ImageDraw.ImageDraw, width: int, height: int) -> None:
-        draw.ellipse((930, -120, 1500, 480), fill=(48, 179, 153, 45))
-        draw.ellipse((-220, 430, 300, 980), fill=(107, 107, 255, 24))
+    def _build_profile_attachment(self, profile: dict[str, Any]) -> discord.File | None:
+        screenshot_path = profile["screenshot_path"]
+        if not screenshot_path:
+            return None
 
-    @staticmethod
-    def _rounded_panel(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], *, radius: int, fill: tuple[int, int, int, int], outline: tuple[int, int, int, int]) -> None:
-        draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=2)
+        screenshot_file = Path(screenshot_path)
+        if not screenshot_file.exists():
+            return None
 
-    def _draw_metric_card(
-        self,
-        draw: ImageDraw.ImageDraw,
-        x: int,
-        y: int,
-        width: int,
-        height: int,
-        label: str,
-        value: str,
-        accent: tuple[int, int, int, int],
-        label_font: ImageFont.ImageFont,
-        value_font: ImageFont.ImageFont,
-    ) -> None:
-        self._rounded_panel(draw, (x, y, x + width, y + height), radius=22, fill=(12, 17, 24, 255), outline=accent)
-        draw.text((x + 24, y + 18), label, font=label_font, fill=(170, 182, 198, 255))
-        draw.text((x + 24, y + 54), value, font=value_font, fill=(245, 249, 255, 255))
-
-    @staticmethod
-    def _draw_table_header(draw: ImageDraw.ImageDraw, x: int, y: int, width: int, height: int, fill: tuple[int, int, int, int], font: ImageFont.ImageFont) -> None:
-        columns = ["NAME", "MATCHES", "MVP", "KILLS", "K/M"]
-        positions = [0.00, 0.38, 0.58, 0.74, 0.89]
-        for column, position in zip(columns, positions, strict=False):
-            draw.text((x + int(width * position), y), column, font=font, fill=fill)
-        draw.line((x, y + height - 2, x + width, y + height - 2), fill=(82, 97, 118, 255), width=2)
-
-    @staticmethod
-    def _draw_table_row(
-        draw: ImageDraw.ImageDraw,
-        x: int,
-        y: int,
-        width: int,
-        height: int,
-        player_name: str,
-        matches: int,
-        mvps: int,
-        kills: int,
-        kill_per_match: float,
-        fill: tuple[int, int, int, int],
-        font: ImageFont.ImageFont,
-    ) -> None:
-        values = [player_name, str(matches), str(mvps), str(kills), f"{kill_per_match:.2f}"]
-        positions = [0.00, 0.38, 0.58, 0.74, 0.89]
-        for index, (value, position) in enumerate(zip(values, positions, strict=False)):
-            if index == 0:
-                name_x = x + int(width * position)
-                for size in range(getattr(font, "size", 18), 12, -1):
-                    try:
-                        fitted_font = ImageFont.truetype("DejaVuSans.ttf", size=size)
-                    except OSError:
-                        fitted_font = font
-                    if draw.textlength(value, font=fitted_font) <= 250:
-                        draw.text((name_x, y + 12), value, font=fitted_font, fill=fill)
-                        break
-                else:
-                    draw.text((name_x, y + 12), value, font=font, fill=fill)
-                continue
-            draw.text((x + int(width * position), y + 12), value, font=font, fill=fill)
-
-    @staticmethod
-    def _draw_multiline_text_box(draw: ImageDraw.ImageDraw, position: tuple[int, int], text: str, font: ImageFont.ImageFont, fill: tuple[int, int, int, int], max_width: int, max_lines: int = 4) -> None:
-        x, y = position
-        words = text.split()
-        lines: list[str] = []
-        current = ""
-        for word in words:
-            candidate = f"{current} {word}".strip()
-            if draw.textlength(candidate, font=font) <= max_width:
-                current = candidate
-                continue
-            if current:
-                lines.append(current)
-            if draw.textlength(word, font=font) <= max_width:
-                current = word
-                continue
-
-            partial = ""
-            for character in word:
-                candidate_piece = partial + character
-                if draw.textlength(candidate_piece, font=font) <= max_width:
-                    partial = candidate_piece
-                    continue
-                if partial:
-                    lines.append(partial)
-                partial = character
-            current = partial
-        if current:
-            lines.append(current)
-
-        for index, line in enumerate(lines[:max_lines]):
-            draw.text((x, y + index * 24), line, font=font, fill=fill)
-
-    @staticmethod
-    def _draw_fitted_text(draw: ImageDraw.ImageDraw, position: tuple[int, int], text: str, font: ImageFont.ImageFont, fill: tuple[int, int, int, int], max_width: int) -> None:
-        x, y = position
-        for size in range(getattr(font, "size", 54), 16, -2):
-            try:
-                fitted_font = ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
-            except OSError:
-                fitted_font = font
-            if draw.textlength(text, font=fitted_font) <= max_width:
-                draw.text((x, y), text, font=fitted_font, fill=fill)
-                return
-        draw.text((x, y), text, font=font, fill=fill)
-
-    @staticmethod
-    def _rounded_mask(size: tuple[int, int], radius: int) -> Image.Image:
-        mask = Image.new("L", size, 0)
-        mask_draw = ImageDraw.Draw(mask)
-        mask_draw.rounded_rectangle((0, 0, size[0] - 1, size[1] - 1), radius=radius, fill=255)
-        return mask
-
-    def _draw_screenshot_panel(self, background: Image.Image, screenshot_path: str | None) -> None:
-        draw = ImageDraw.Draw(background)
-        subtitle_font = self._load_font(22)
-
-        screenshot_image = self._load_screenshot_image(screenshot_path)
-        if screenshot_image is None:
-            self._rounded_panel(draw, (90, 300, 410, 720), radius=24, fill=(10, 14, 20, 255), outline=(82, 97, 118, 255))
-            draw.text((145, 490), "NO SCREENSHOT", font=subtitle_font, fill=(160, 174, 191, 255))
-            return
-
-        screenshot_image = screenshot_image.convert("RGBA")
-        screenshot_image = ImageOps.pad(
-            screenshot_image,
-            (280, 380),
-            method=Image.Resampling.LANCZOS,
-            color=(10, 14, 20, 255),
-            centering=(0.5, 0.35),
-        )
-        frame_w, frame_h = 320, 420
-        frame_x, frame_y = 90, 300
-        self._rounded_panel(draw, (frame_x, frame_y, frame_x + frame_w, frame_y + frame_h), radius=24, fill=(10, 14, 20, 255), outline=(82, 97, 118, 255))
-        image_x = frame_x + (frame_w - screenshot_image.width) // 2
-        image_y = frame_y + (frame_h - screenshot_image.height) // 2
-
-        shadow = Image.new("RGBA", screenshot_image.size, (0, 0, 0, 0))
-        shadow_draw = ImageDraw.Draw(shadow)
-        shadow_draw.rounded_rectangle((0, 0, screenshot_image.width - 1, screenshot_image.height - 1), radius=18, fill=(0, 0, 0, 85))
-        shadow = shadow.filter(ImageFilter.GaussianBlur(10))
-        background.alpha_composite(shadow, (image_x + 4, image_y + 6))
-        background.paste(screenshot_image, (image_x, image_y), self._rounded_mask(screenshot_image.size, 18))
-
-    @staticmethod
-    def _draw_footer(draw: ImageDraw.ImageDraw, player_name: str, font: ImageFont.ImageFont) -> None:
-        footer = f"Profile generated for {player_name} | updated live when scrim results are submitted"
-        draw.text((500, 726), footer, font=font, fill=(146, 158, 174, 255))
-
-    @staticmethod
-    def _load_screenshot_image(screenshot_path: str | None) -> Image.Image | None:
-        file_path = Path(screenshot_path) if screenshot_path else None
-        return Image.open(file_path) if file_path is not None and file_path.exists() else None
+        return discord.File(screenshot_file, filename=screenshot_file.name)
 
     @staticmethod
     def _truncate_text(text: str, limit: int = 1024) -> str:
