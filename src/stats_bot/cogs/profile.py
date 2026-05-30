@@ -23,13 +23,17 @@ class ProfileSubmission:
     source_message_id: int
     attachment_url: str
     local_path: str
+    from ..tracker import TrackerClient, TrackerProfile
     ocr_text: str
     player_name: str
-
+        def __init__(self, cog: "ProfileCog", tracker_url: str | None = None) -> None:
 
 class ProfileReviewView(discord.ui.View):
+            if tracker_url:
+                self.add_item(discord.ui.Button(label="Tracker", style=discord.ButtonStyle.link, url=tracker_url))
     def __init__(self, cog: "ProfileCog", submission_id: int, requester_id: int, player_name: str) -> None:
         super().__init__(timeout=3600)
+            self.tracker_client = None
         self.cog = cog
         self.submission_id = submission_id
         self.requester_id = requester_id
@@ -41,8 +45,17 @@ class ProfileReviewView(discord.ui.View):
             return False
         return True
 
+            if settings.tracker_api_key and settings.tracker_title_slug and settings.tracker_platform:
+                self.tracker_client = TrackerClient(
+                    api_key=settings.tracker_api_key,
+                    title_slug=settings.tracker_title_slug,
+                    platform=settings.tracker_platform,
+                    base_url=settings.tracker_base_url,
+                )
+
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green)
-    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        def create_card_view(self, tracker_url: str | None = None) -> ProfileCardView:
+            return ProfileCardView(self, tracker_url=tracker_url)
         await interaction.response.defer()
         await self.cog.handle_profile_decision(interaction, self.submission_id, self.player_name, approved=True)
 
@@ -61,8 +74,9 @@ class ProfileCardView(discord.ui.View):
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         profile_name = self._extract_profile_name(interaction)
         if profile_name is None:
-            await interaction.response.send_message("I could not tell which profile this is.", ephemeral=True)
-            return
+            tracker_profile = await self._maybe_fetch_tracker_profile(profile)
+            embed, file = self._build_profile_card(profile, tracker_profile)
+            kwargs: dict[str, Any] = {"embed": embed, "view": self.create_card_view(tracker_profile.profile_url if tracker_profile else None)}
 
         refreshed = await self.cog.refresh_profile_card_for_player(profile_name)
         if refreshed is None:
@@ -87,8 +101,9 @@ class ProfileCardView(discord.ui.View):
     def _extract_profile_name(interaction: discord.Interaction) -> str | None:
         message = interaction.message
         if message is None or not message.embeds:
-            return None
-
+            tracker_profile = await self._maybe_fetch_tracker_profile(profile)
+            embed, file = self._build_profile_card(profile, tracker_profile)
+            kwargs: dict[str, Any] = {"embed": embed, "view": self.create_card_view(tracker_profile.profile_url if tracker_profile else None)}
         embed = message.embeds[0]
         if not embed.title:
             return None
@@ -134,6 +149,12 @@ class ProfileCog(commands.Cog):
         await self.refresh_profile_announcement(channel=channel)
         await interaction.followup.send(f"Posted instructions in {channel.mention}.", ephemeral=True)
 
+            if tracker_profile is not None:
+                embed.add_field(name="Tracker", value=f"[{tracker_profile.display_name}]({tracker_profile.profile_url})", inline=False)
+                if tracker_profile.stats:
+                    stats_lines = self._format_tracker_stats(tracker_profile.stats)
+                    if stats_lines:
+                        embed.add_field(name="Tracker Stats", value="\n".join(stats_lines), inline=False)
     @app_commands.command(name="profile", description="Create or refresh a player's stats card in the profile stats channel")
     @app_commands.describe(member="The registered Discord member to show on the profile card")
     async def profile(self, interaction: discord.Interaction, member: discord.Member) -> None:

@@ -20,13 +20,13 @@ Discord bot for tracking scrim performance and profile registration:
 
 This version stores one aggregate row per player. Each recorded match updates that player's totals.
 The profile workflow watches a submission channel, OCRs screenshots with OpenRouter, saves the image on the Pi, and DMs the user a private approval prompt.
-`/profile` builds a persistent profile card in the stats channel and refreshes it when scrim results are submitted.
+`/profile` builds a persistent profile card in the stats channel, attaches the submitted screenshot, and can pull live profile stats from Tracker.gg when you set `TRACKER_API_KEY`, `TRACKER_TITLE_SLUG`, and `TRACKER_PLATFORM`.
 
 ## Local setup
 
 1. Create and activate a virtual environment.
 2. Install dependencies with `pip install -r requirements.txt`.
-3. Copy `.env.example` to `.env` and fill in your Discord token, submission channel IDs, OpenRouter key, screenshot directory, and PostgreSQL URL.
+3. Copy `.env.example` to `.env` and fill in your Discord token, submission channel IDs, OpenRouter key, optional Tracker.gg settings, screenshot directory, and PostgreSQL URL.
 4. Run `python src/main.py`.
 
 ## Entry format
@@ -43,7 +43,7 @@ The bot will create missing players automatically.
 2. Create the PostgreSQL database and user on the Pi.
 3. Clone this repo into a folder like `/opt/stats-bot`.
 4. Create a virtual environment and install `requirements.txt`.
-5. Create a `.env` file on the Pi with the token, optional guild ID, submission channel ID, stats channel ID, OpenRouter key, screenshot directory, and `DATABASE_URL`.
+5. Create a `.env` file on the Pi with the token, optional guild ID, submission channel ID, stats channel ID, OpenRouter key, optional Tracker.gg settings, screenshot directory, and `DATABASE_URL`.
 6. Enable the Discord bot's Message Content Intent in the Developer Portal so it can watch image posts.
 7. Run the bot once manually to confirm it logs in and creates tables.
 8. Install a systemd service so the bot restarts on boot.
@@ -87,6 +87,7 @@ If you already have a remote PostgreSQL server, use its host instead of `localho
 6. Approving saves the profile row with zeroed stats and posts the profile card in the stats channel.
 7. `/profile member:<discord member>` refreshes that player's card in the stats channel.
 8. Scrim result submissions refresh the saved profile cards automatically.
+9. If the bot cannot delete the original screenshot message, check that it has `Manage Messages` in the submission channel.
 
 Note: Discord does not support truly private replies for normal message listeners, so the confirmation step is handled by DM.
 

@@ -19,6 +19,10 @@ class Settings:
     openrouter_base_url: str
     openrouter_app_name: str
     openrouter_site_url: str | None
+    tracker_api_key: str | None
+    tracker_title_slug: str | None
+    tracker_platform: str | None
+    tracker_base_url: str
 
 
 def load_settings() -> Settings:
@@ -49,8 +53,16 @@ def load_settings() -> Settings:
     openrouter_app_name = os.getenv("OPENROUTER_APP_NAME", "Stats Bot").strip() or "Stats Bot"
     openrouter_site_url = os.getenv("OPENROUTER_SITE_URL", "").strip() or None
 
+    tracker_api_key = os.getenv("TRACKER_API_KEY", "").strip() or None
+    tracker_title_slug = os.getenv("TRACKER_TITLE_SLUG", "").strip() or None
+    tracker_platform = os.getenv("TRACKER_PLATFORM", "").strip() or None
+    tracker_base_url = os.getenv("TRACKER_BASE_URL", "https://public-api.tracker.gg/v2").strip() or "https://public-api.tracker.gg/v2"
+
     if profile_submission_channel_id is not None and not openrouter_api_key:
         raise RuntimeError("OPENROUTER_API_KEY is required when PROFILE_SUBMISSION_CHANNEL_ID is set")
+
+    if tracker_api_key and (not tracker_title_slug or not tracker_platform):
+        raise RuntimeError("TRACKER_TITLE_SLUG and TRACKER_PLATFORM are required when TRACKER_API_KEY is set")
 
     log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
 
@@ -67,6 +79,10 @@ def load_settings() -> Settings:
         openrouter_base_url=openrouter_base_url,
         openrouter_app_name=openrouter_app_name,
         openrouter_site_url=openrouter_site_url,
+        tracker_api_key=tracker_api_key,
+        tracker_title_slug=tracker_title_slug,
+        tracker_platform=tracker_platform,
+        tracker_base_url=tracker_base_url,
     )
 
 
