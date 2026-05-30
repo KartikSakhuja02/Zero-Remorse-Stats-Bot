@@ -191,14 +191,14 @@ class ProfileCog(commands.Cog):
             logger.info(
                 "Approving profile submission %s for discord_user_id=%s player_name=%s",
                 submission_id,
-                submission.discord_user_id,
+                submission["discord_user_id"],
                 player_name,
             )
             self._upsert_player_profile(
                 player_name=player_name,
-                discord_user_id=submission.discord_user_id,
-                screenshot_path=submission.local_path,
-                ocr_text=submission.ocr_text,
+                discord_user_id=submission["discord_user_id"],
+                screenshot_path=submission["local_path"],
+                ocr_text=submission["ocr_text"],
             )
             logger.info("Saved profile for %s", player_name)
 
@@ -215,7 +215,7 @@ class ProfileCog(commands.Cog):
         await self._safe_edit_interaction_message(interaction, message_text)
 
         if approved:
-            await self.refresh_profile_card(submission.discord_user_id, create_if_missing=True)
+            await self.refresh_profile_card(submission["discord_user_id"], create_if_missing=True)
 
     async def refresh_profile_card(self, discord_user_id: int, create_if_missing: bool = False) -> bool | None:
         profile = self._get_profile_by_user(discord_user_id)
