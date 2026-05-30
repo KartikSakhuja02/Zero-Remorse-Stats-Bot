@@ -159,10 +159,10 @@ class StatsCog(commands.Cog):
             return
 
         lines = [f"Top players by {sort_key}:"]
-        for index, row in enumerate(rows, start=1):
-            lines.append(
-                f"{index}. {row['player_name']} - matches {int(row['matches'])}, mvps {int(row['mvp'])}, kills {int(row['kills'])}, km {float(row['kill_per_match']):.2f}"
-            )
+        lines.extend(
+            f"{index}. {row['player_name']} - matches {int(row['matches'])}, mvps {int(row['mvp'])}, kills {int(row['kills'])}, km {float(row['kill_per_match']):.2f}"
+            for index, row in enumerate(rows, start=1)
+        )
 
         await interaction.response.send_message("\n".join(lines))
 
@@ -172,16 +172,6 @@ class StatsCog(commands.Cog):
             "This version stores aggregate player totals only, so individual match history is not tracked.",
             ephemeral=True,
         )
-
-    async def cog_load(self) -> None:
-        self.bot.tree.add_command(self.stats)
-        self.bot.tree.add_command(self.add_player)
-        self.bot.tree.add_command(self.record_match)
-
-    async def cog_unload(self) -> None:
-        self.bot.tree.remove_command(self.stats.name, type=self.stats.type)
-        self.bot.tree.remove_command(self.add_player.name, type=self.add_player.type)
-        self.bot.tree.remove_command(self.record_match.name, type=self.record_match.type)
 
     @staticmethod
     def _normalize_name(name: str) -> str:
