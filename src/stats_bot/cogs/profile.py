@@ -186,6 +186,60 @@ class ProfileCog(commands.Cog):
 
         await interaction.followup.send(f"Updated profile card for {member.mention}.", ephemeral=True)
 
+    @app_commands.command(name="submit", description="Submit 1 to 3 match screenshots to update your registered stats")
+    @app_commands.describe(
+        ss1="First screenshot",
+        ss2="Second screenshot",
+        ss3="Third screenshot",
+    )
+    async def submit(
+        self,
+        interaction: discord.Interaction,
+        ss1: discord.Attachment,
+        ss2: discord.Attachment | None = None,
+        ss3: discord.Attachment | None = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        if self.ocr_client is None:
+            await interaction.followup.send("OCR is not configured yet.", ephemeral=True)
+            return
+
+        profile = self._get_profile_by_user(interaction.user.id)
+        if profile is None:
+            await interaction.followup.send("You are not linked yet. Use `/trn` or the profile setup flow first.", ephemeral=True)
+            return
+
+        attachments = [attachment for attachment in (ss1, ss2, ss3) if attachment is not None]
+        if not attachments:
+            await interaction.followup.send("Attach at least one screenshot.", ephemeral=True)
+            return
+
+        kills_by_screenshot: list[tuple[str, int]] = []
+        total_kills = 0
+        for attachment in attachments:
+            image_bytes = await attachment.read()
+            kills = await self.ocr_client.extract_kills_for_player(
+                image_bytes,
+                profile["player_name"],
+                attachment.content_type or "image/png",
+            )
+            kills_by_screenshot.append((attachment.filename, kills))
+            total_kills += kills
+
+        self._apply_match_submission(profile["player_name"], interaction.user.id, len(attachments), total_kills)
+
+        refreshed = await self.refresh_profile_card(interaction.user.id, create_if_missing=True)
+        lines = [
+            f"Updated {profile['player_name']} from {len(attachments)} screenshot(s).",
+            *[f"{filename}: {kills} kills" for filename, kills in kills_by_screenshot],
+            f"Total kills added: {total_kills}",
+        ]
+        if refreshed is None:
+            lines.append("I updated the database, but I could not refresh the profile card because the stats channel is not configured.")
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
     @app_commands.command(name="trn", description="Link your Discord account to your Tracker IGN")
     @app_commands.describe(myign="Your Tracker IGN")
     async def trn(self, interaction: discord.Interaction, myign: str) -> None:
@@ -598,6 +652,30 @@ class ProfileCog(commands.Cog):
                         updated_at = NOW()
                     """,
                     (player_name, discord_user_id),
+                )
+
+    def _apply_match_submission(self, player_name: str, discord_user_id: int, matches_added: int, kills_added: int) -> None:
+        with self.database.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO player_stats (
+                        player_name,
+                        matches,
+                        mvp,
+                        kills,
+                        discord_user_id,
+                        registered_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, 0, %s, %s, COALESCE((SELECT registered_at FROM player_stats WHERE player_name = %s), NOW()), NOW())
+                    ON CONFLICT (player_name) DO UPDATE
+                    SET matches = player_stats.matches + EXCLUDED.matches,
+                        kills = player_stats.kills + EXCLUDED.kills,
+                        discord_user_id = EXCLUDED.discord_user_id,
+                        updated_at = NOW()
+                    """,
+                    (player_name, matches_added, kills_added, discord_user_id, player_name),
                 )
 
     def _get_profile_by_name(self, player_name: str) -> dict[str, Any] | None:

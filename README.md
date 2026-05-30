@@ -16,11 +16,13 @@ Discord bot for tracking scrim performance and profile registration:
 - `/stats recent`
 - `/add_player name:<player name>`
 - `/profile_setup`
+- `/submit ss1:<screenshot> [ss2:<screenshot>] [ss3:<screenshot>]`
 - `/trn myign:<your Tracker IGN>`
 - `/profile member:<discord member>`
 
 This version stores one aggregate row per player. Each recorded match updates that player's totals.
 The profile workflow watches a submission channel, OCRs screenshots with OpenRouter, saves the image on the Pi, and DMs the user a private approval prompt.
+`/submit` OCRs 1 to 3 match screenshots, pulls the kills from each one, and updates the registered player's stats.
 `/trn` links a Discord account to a Tracker IGN in the database.
 `/profile` builds a persistent profile card in the stats channel, attaches the submitted screenshot, and can pull live profile stats from Tracker.gg when you set `TRACKER_API_KEY`, `TRACKER_TITLE_SLUG`, and `TRACKER_PLATFORM`.
 
@@ -87,10 +89,11 @@ If you already have a remote PostgreSQL server, use its host instead of `localho
 4. Players send a screenshot of their profile in that channel.
 5. The bot OCRs the screenshot with OpenRouter, saves the image on the Pi, extracts the player name, and sends the user a DM with Approve and Decline buttons.
 6. Approving saves the profile row with zeroed stats and posts the profile card in the stats channel.
-7. `/trn myign:<your Tracker IGN>` links a Discord account to a Tracker IGN in the database.
-8. `/profile member:<discord member>` refreshes that player's card in the stats channel.
-9. Scrim result submissions refresh the saved profile cards automatically.
-10. If the bot cannot delete the original screenshot message, check that it has `Manage Messages` in the submission channel.
+7. `/submit` OCRs 1 to 3 match screenshots, extracts the kills from each one, and updates the registered player's stats.
+8. `/trn myign:<your Tracker IGN>` links a Discord account to a Tracker IGN in the database.
+9. `/profile member:<discord member>` refreshes that player's card in the stats channel.
+10. Scrim result submissions refresh the saved profile cards automatically.
+11. If the bot cannot delete the original screenshot message, check that it has `Manage Messages` in the submission channel.
 
 Note: Discord does not support truly private replies for normal message listeners, so the confirmation step is handled by DM.
 

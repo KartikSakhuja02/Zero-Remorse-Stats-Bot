@@ -22,6 +22,38 @@ class OpenRouterOCRClient:
         self.site_url = site_url
 
     async def extract_player_name(self, image_bytes: bytes, mime_type: str = "image/png") -> str:
+        content = await self._chat_completion_text(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            system_prompt=(
+                "You are OCR for a game profile screenshot. "
+                "Extract only the player profile name. "
+                "Return only the exact name and nothing else."
+            ),
+            user_prompt="Extract the profile name from this screenshot.",
+        )
+        return self._clean_extracted_text(content)
+
+    async def extract_kills_for_player(self, image_bytes: bytes, player_name: str, mime_type: str = "image/png") -> int:
+        content = await self._chat_completion_text(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            system_prompt=(
+                "You are OCR for a Rainbow Six Mobile match screenshot. "
+                "The user already gave you the registered player IGN. "
+                "Find that player in the image and return only the kills number from that row. "
+                "Return only the number and nothing else."
+            ),
+            user_prompt=f"Find the row for {player_name} and return only the kills value.",
+        )
+        cleaned = self._clean_extracted_text(content)
+        match = re.search(r"-?\d+", cleaned)
+        if match is None:
+            raise RuntimeError(f"Could not extract kills from OCR output: {content}")
+
+        return int(match.group(0))
+
+    async def _chat_completion_text(self, *, image_bytes: bytes, mime_type: str, system_prompt: str, user_prompt: str) -> str:
         data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
         payload = {
             "model": self.model,
@@ -29,18 +61,14 @@ class OpenRouterOCRClient:
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "You are OCR for a game profile screenshot. "
-                        "Extract only the player profile name. "
-                        "Return only the exact name and nothing else."
-                    ),
+                    "content": system_prompt,
                 },
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": "Extract the profile name from this screenshot.",
+                            "text": user_prompt,
                         },
                         {
                             "type": "image_url",
@@ -73,8 +101,7 @@ class OpenRouterOCRClient:
         content = data["choices"][0]["message"]["content"]
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-
-        return self._clean_extracted_text(str(content))
+        return str(content)
 
     @staticmethod
     def _clean_extracted_text(text: str) -> str:
