@@ -207,6 +207,9 @@ class ProfileCog(commands.Cog):
             await self._safe_edit_interaction_message(interaction, "This submission was already handled.")
             return
 
+        if approved:
+            await self._delete_submission_message(submission["source_channel_id"], submission["source_message_id"])
+
         message_text = (
             f"Approved. {player_name} is now registered."
             if approved
@@ -482,6 +485,18 @@ class ProfileCog(commands.Cog):
                     """,
                     (channel_id, message_id),
                 )
+
+    async def _delete_submission_message(self, channel_id: int, message_id: int) -> None:
+        channel = self.bot.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            fetched_channel = await self.bot.fetch_channel(channel_id)
+            if not isinstance(fetched_channel, discord.TextChannel):
+                return
+            channel = fetched_channel
+
+        with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+            message = await channel.fetch_message(message_id)
+            await message.delete()
 
     async def _purge_bot_messages(self, channel: discord.TextChannel) -> None:
         bot_user = self.bot.user
