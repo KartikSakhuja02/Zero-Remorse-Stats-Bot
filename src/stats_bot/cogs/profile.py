@@ -90,6 +90,8 @@ class ProfileCog(commands.Cog):
                 old_message = await resolved_channel.fetch_message(old_message_id)
                 await old_message.delete()
 
+        await self._delete_previous_bot_messages(resolved_channel)
+
         embed = discord.Embed(
             title="Submit Your Profile",
             description=(
@@ -276,6 +278,18 @@ class ProfileCog(commands.Cog):
                     """,
                     (channel_id, message_id),
                 )
+
+    async def _delete_previous_bot_messages(self, channel: discord.TextChannel) -> None:
+        bot_user = self.bot.user
+        if bot_user is None:
+            return
+
+        async for message in channel.history(limit=100):
+            if message.author.id != bot_user.id:
+                continue
+
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await message.delete()
 
     @staticmethod
     async def _safe_notify_user(user: discord.User | discord.Member, message: str) -> None:
