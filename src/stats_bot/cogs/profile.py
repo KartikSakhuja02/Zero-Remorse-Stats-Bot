@@ -107,6 +107,7 @@ class ProfileCog(commands.Cog):
         self.database = database
         self.settings = settings
         self.ocr_client = None
+        self.tracker_client = None
         self._announcement_refreshed = False
 
         self.screenshot_dir = Path(settings.profile_screenshot_dir)
@@ -119,6 +120,14 @@ class ProfileCog(commands.Cog):
                 base_url=settings.openrouter_base_url,
                 app_name=settings.openrouter_app_name,
                 site_url=settings.openrouter_site_url,
+            )
+
+        if settings.tracker_api_key and settings.tracker_title_slug and settings.tracker_platform:
+            self.tracker_client = TrackerClient(
+                api_key=settings.tracker_api_key,
+                title_slug=settings.tracker_title_slug,
+                platform=settings.tracker_platform,
+                base_url=settings.tracker_base_url,
             )
 
     def create_card_view(self) -> ProfileCardView:
