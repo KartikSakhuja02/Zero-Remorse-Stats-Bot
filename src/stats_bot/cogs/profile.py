@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 import logging
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -20,18 +22,18 @@ class ProfileSubmission:
     source_channel_id: int
     source_message_id: int
     attachment_url: str
+    local_path: str
     ocr_text: str
     player_name: str
 
 
 class ProfileReviewView(discord.ui.View):
-    def __init__(self, cog: "ProfileCog", submission_id: int, requester_id: int, player_name: str, ocr_text: str) -> None:
+    def __init__(self, cog: "ProfileCog", submission_id: int, requester_id: int, player_name: str) -> None:
         super().__init__(timeout=3600)
         self.cog = cog
         self.submission_id = submission_id
         self.requester_id = requester_id
         self.player_name = player_name
-        self.ocr_text = ocr_text
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.requester_id:
@@ -49,11 +51,16 @@ class ProfileReviewView(discord.ui.View):
 
 
 class ProfileCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, database: Database, settings) -> None:
+    def __init__(self, bot: commands.Bot, database: Database, settings: Any) -> None:
         self.bot = bot
         self.database = database
         self.settings = settings
         self.ocr_client = None
+        self._announcement_refreshed = False
+
+        self.screenshot_dir = Path(settings.profile_screenshot_dir)
+        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+
         if settings.openrouter_api_key:
             self.ocr_client = OpenRouterOCRClient(
                 api_key=settings.openrouter_api_key,
@@ -63,10 +70,8 @@ class ProfileCog(commands.Cog):
                 site_url=settings.openrouter_site_url,
             )
 
-    profile = app_commands.Group(name="profile", description="Profile submission workflow")
-
-    @profile.command(name="announce", description="Post the profile submission instructions in the submission channel")
-    async def announce(self, interaction: discord.Interaction) -> None:
+    @app_commands.command(name="profile_setup", description="Post the profile submission instructions in the submission channel")
+    async def profile_setup(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         channel = await self._get_submission_channel()
         if channel is None:
@@ -75,6 +80,21 @@ class ProfileCog(commands.Cog):
 
         await self.refresh_profile_announcement(channel=channel)
         await interaction.followup.send(f"Posted instructions in {channel.mention}.", ephemeral=True)
+
+    @app_commands.command(name="profile", description="Create or refresh a player's stats card in the profile stats channel")
+    @app_commands.describe(member="The registered Discord member to show on the profile card")
+    async def profile(self, interaction: discord.Interaction, member: discord.Member) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if self.settings.profile_stats_channel_id is None:
+            await interaction.followup.send("PROFILE_STATS_CHANNEL_ID is not configured.", ephemeral=True)
+            return
+
+        result = await self.refresh_profile_card(member.id, create_if_missing=True)
+        if result is None:
+            await interaction.followup.send("I could not find a registered profile for that member.", ephemeral=True)
+            return
+
+        await interaction.followup.send(f"Updated profile card for {member.mention}.", ephemeral=True)
 
     async def refresh_profile_announcement(self, channel: discord.TextChannel | None = None) -> None:
         if self.settings.profile_submission_channel_id is None:
@@ -131,11 +151,13 @@ class ProfileCog(commands.Cog):
             if not normalized_name:
                 raise RuntimeError("OCR returned an empty player name")
 
+            local_path = await self._save_profile_screenshot_async(message.id, normalized_name, image_attachment)
             submission_id = self._save_submission(
                 discord_user_id=message.author.id,
                 source_channel_id=message.channel.id,
                 source_message_id=message.id,
                 attachment_url=image_attachment.url,
+                local_path=local_path,
                 ocr_text=extracted_name,
                 player_name=normalized_name,
             )
@@ -150,7 +172,7 @@ class ProfileCog(commands.Cog):
             embed.add_field(name="Raw OCR", value=extracted_name[:1024], inline=False)
             embed.set_image(url=image_attachment.url)
 
-            view = ProfileReviewView(self, submission_id, message.author.id, normalized_name, extracted_name)
+            view = ProfileReviewView(self, submission_id, message.author.id, normalized_name)
             await dm_channel.send(embed=embed, view=view)
 
         except Exception as exc:
@@ -164,33 +186,21 @@ class ProfileCog(commands.Cog):
         player_name: str,
         approved: bool,
     ) -> None:
-        with self.database.connect() as connection:
-            with connection.cursor() as cursor:
-                if approved:
-                    cursor.execute(
-                        """
-                        INSERT INTO player_stats (player_name)
-                        VALUES (%s)
-                        ON CONFLICT (player_name) DO NOTHING
-                        """,
-                        (player_name,),
-                    )
+        submission = self._get_submission(submission_id)
+        if submission is None:
+            await interaction.response.send_message("I could not find that submission.", ephemeral=True)
+            return
 
-                cursor.execute(
-                    """
-                    UPDATE profile_submissions
-                    SET status = %s,
-                        reviewed_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = %s
-                      AND status = 'pending'
-                    RETURNING id
-                    """,
-                    ("approved" if approved else "declined", submission_id),
-                )
-                updated = cursor.fetchone()
+        if approved:
+            self._upsert_player_profile(
+                player_name=player_name,
+                discord_user_id=submission.discord_user_id,
+                screenshot_path=submission.local_path,
+                ocr_text=submission.ocr_text,
+            )
 
-        if updated is None:
+        updated = self._mark_submission_reviewed(submission_id, approved)
+        if not updated:
             await interaction.response.send_message("This submission was already handled.", ephemeral=True)
             return
 
@@ -201,43 +211,66 @@ class ProfileCog(commands.Cog):
         )
         await interaction.response.edit_message(content=message_text, embed=None, view=None)
 
-    def _save_submission(
-        self,
-        discord_user_id: int,
-        source_channel_id: int,
-        source_message_id: int,
-        attachment_url: str,
-        ocr_text: str,
-        player_name: str,
-    ) -> int:
-        with self.database.connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO profile_submissions (
-                        discord_user_id,
-                        source_channel_id,
-                        source_message_id,
-                        attachment_url,
-                        ocr_text,
-                        player_name,
-                        status
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, 'pending')
-                    RETURNING id
-                    """,
-                    (discord_user_id, source_channel_id, source_message_id, attachment_url, ocr_text, player_name),
-                )
-                row = cursor.fetchone()
+        if approved:
+            await self.refresh_profile_card(submission.discord_user_id, create_if_missing=True)
 
-        return int(row["id"])
+    async def refresh_profile_card(self, discord_user_id: int, create_if_missing: bool = False) -> bool | None:
+        profile = self._get_profile_by_user(discord_user_id)
+        if profile is None:
+            return None
 
-    @commands.Cog.listener()
+        channel = await self._get_profile_stats_channel()
+        if channel is None:
+            return None
+
+        page_state = self._get_profile_page_state(profile["player_name"])
+        if page_state is not None:
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                old_message = await channel.fetch_message(page_state["message_id"])
+                await old_message.delete()
+        elif not create_if_missing:
+            return True
+
+        embed, file = self._build_profile_card(profile)
+        kwargs: dict[str, Any] = {"embed": embed}
+        if file is not None:
+            kwargs["file"] = file
+
+        new_message = await channel.send(**kwargs)
+        self._save_profile_page_state(profile["player_name"], channel.id, new_message.id)
+        return True
+
+    async def refresh_profile_card_for_player(self, player_name: str) -> bool | None:
+        profile = self._get_profile_by_name(player_name)
+        if profile is None:
+            return None
+
+        channel = await self._get_profile_stats_channel()
+        if channel is None:
+            return None
+
+        page_state = self._get_profile_page_state(player_name)
+        if page_state is None:
+            return True
+
+        with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+            old_message = await channel.fetch_message(page_state["message_id"])
+            await old_message.delete()
+
+        embed, file = self._build_profile_card(profile)
+        kwargs: dict[str, Any] = {"embed": embed}
+        if file is not None:
+            kwargs["file"] = file
+
+        new_message = await channel.send(**kwargs)
+        self._save_profile_page_state(player_name, channel.id, new_message.id)
+        return True
+
     async def on_ready(self) -> None:
-        if getattr(self.bot, "_profile_announcement_refreshed", False):
+        if self._announcement_refreshed:
             return
 
-        setattr(self.bot, "_profile_announcement_refreshed", True)
+        self._announcement_refreshed = True
         await self.refresh_profile_announcement()
 
     async def _get_submission_channel(self) -> discord.TextChannel | None:
@@ -253,6 +286,141 @@ class ProfileCog(commands.Cog):
             return fetched_channel
 
         return None
+
+    async def _get_profile_stats_channel(self) -> discord.TextChannel | None:
+        if self.settings.profile_stats_channel_id is None:
+            return None
+
+        channel = self.bot.get_channel(self.settings.profile_stats_channel_id)
+        if isinstance(channel, discord.TextChannel):
+            return channel
+
+        fetched_channel = await self.bot.fetch_channel(self.settings.profile_stats_channel_id)
+        if isinstance(fetched_channel, discord.TextChannel):
+            return fetched_channel
+
+        return None
+
+    def _get_submission(self, submission_id: int) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, discord_user_id, local_path, ocr_text, player_name, status
+                    FROM profile_submissions
+                    WHERE id = %s
+                    """,
+                    (submission_id,),
+                )
+                row = cursor.fetchone()
+
+        return row
+
+    def _mark_submission_reviewed(self, submission_id: int, approved: bool) -> bool:
+        with self.database.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE profile_submissions
+                    SET status = %s,
+                        reviewed_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = %s
+                      AND status = 'pending'
+                    RETURNING id
+                    """,
+                    ("approved" if approved else "declined", submission_id),
+                )
+                updated = cursor.fetchone()
+
+        return updated is not None
+
+    def _upsert_player_profile(self, player_name: str, discord_user_id: int, screenshot_path: str, ocr_text: str) -> None:
+        with self.database.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO player_stats (
+                        player_name,
+                        matches,
+                        mvp,
+                        kills,
+                        discord_user_id,
+                        registered_at,
+                        screenshot_path,
+                        ocr_text,
+                        updated_at
+                    )
+                    VALUES (%s, 0, 0, 0, %s, NOW(), %s, %s, NOW())
+                    ON CONFLICT (player_name) DO UPDATE
+                    SET discord_user_id = EXCLUDED.discord_user_id,
+                        screenshot_path = EXCLUDED.screenshot_path,
+                        ocr_text = EXCLUDED.ocr_text,
+                        registered_at = COALESCE(player_stats.registered_at, NOW()),
+                        updated_at = NOW()
+                    """,
+                    (player_name, discord_user_id, screenshot_path, ocr_text),
+                )
+
+    def _get_profile_by_user(self, discord_user_id: int) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT player_name, matches, mvp, kills, kill_per_match, discord_user_id, screenshot_path, ocr_text
+                    FROM player_stats
+                    WHERE discord_user_id = %s
+                    """,
+                    (discord_user_id,),
+                )
+                row = cursor.fetchone()
+
+        return row
+
+    def _get_profile_by_name(self, player_name: str) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT player_name, matches, mvp, kills, kill_per_match, discord_user_id, screenshot_path, ocr_text
+                    FROM player_stats
+                    WHERE player_name = %s
+                    """,
+                    (player_name,),
+                )
+                row = cursor.fetchone()
+
+        return row
+
+    def _get_profile_page_state(self, player_name: str) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT channel_id, message_id
+                    FROM profile_pages
+                    WHERE player_name = %s
+                    """,
+                    (player_name,),
+                )
+                row = cursor.fetchone()
+
+        return row
+
+    def _save_profile_page_state(self, player_name: str, channel_id: int, message_id: int) -> None:
+        with self.database.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO profile_pages (player_name, channel_id, message_id, updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (player_name) DO UPDATE
+                    SET channel_id = EXCLUDED.channel_id,
+                        message_id = EXCLUDED.message_id,
+                        updated_at = NOW()
+                    """,
+                    (player_name, channel_id, message_id),
+                )
 
     def _get_announcement_message_id(self, channel_id: int) -> int | None:
         with self.database.connect() as connection:
@@ -290,6 +458,68 @@ class ProfileCog(commands.Cog):
 
             with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
                 await message.delete()
+
+    async def _save_attachment_to_disk(self, attachment: discord.Attachment, file_path: Path) -> str:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(await attachment.read())
+        return str(file_path)
+
+    async def _save_profile_screenshot_async(self, message_id: int, player_name: str, attachment: discord.Attachment) -> str:
+        suffix = self._file_suffix_for_attachment(attachment)
+        safe_name = self._sanitize_filename(player_name)
+        file_path = self.screenshot_dir / f"{message_id}_{safe_name}{suffix}"
+        return await self._save_attachment_to_disk(attachment, file_path)
+
+    def _build_profile_card(self, profile: dict[str, Any]) -> tuple[discord.Embed, discord.File | None]:
+        player_name = profile["player_name"]
+        matches = int(profile["matches"])
+        mvps = int(profile["mvp"])
+        kills = int(profile["kills"])
+        kill_per_match = float(profile["kill_per_match"])
+        discord_user_id = profile["discord_user_id"]
+        screenshot_path = profile["screenshot_path"]
+        ocr_text = profile["ocr_text"]
+
+        embed = discord.Embed(title=f"Profile Card - {player_name}", color=discord.Color.teal())
+        embed.add_field(name="Registered IGN", value=player_name, inline=False)
+        embed.add_field(name="Discord User", value=f"<@{discord_user_id}>" if discord_user_id else "Not linked", inline=False)
+        embed.add_field(name="Matches", value=str(matches), inline=True)
+        embed.add_field(name="MVP", value=str(mvps), inline=True)
+        embed.add_field(name="Kills", value=str(kills), inline=True)
+        embed.add_field(name="K/M", value=f"{kill_per_match:.2f}", inline=True)
+        embed.add_field(name="OCR Text", value=self._truncate_text(ocr_text), inline=False)
+
+        if screenshot_path:
+            file_path = Path(screenshot_path)
+            if file_path.exists():
+                file = discord.File(file_path, filename=file_path.name)
+                embed.set_image(url=f"attachment://{file_path.name}")
+                return embed, file
+
+        return embed, None
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int = 1024) -> str:
+        return text if len(text) <= limit else f"{text[: limit - 3]}..."
+
+    @staticmethod
+    def _file_suffix_for_attachment(attachment: discord.Attachment) -> str:
+        content_type = (attachment.content_type or "").lower()
+        if content_type.endswith("png"):
+            return ".png"
+        if content_type.endswith("jpeg") or content_type.endswith("jpg"):
+            return ".jpg"
+        if content_type.endswith("webp"):
+            return ".webp"
+        if content_type.endswith("gif"):
+            return ".gif"
+        filename = attachment.filename.lower()
+        return next((suffix for suffix in (".png", ".jpg", ".jpeg", ".webp", ".gif") if filename.endswith(suffix)), ".png")
+
+    @staticmethod
+    def _sanitize_filename(name: str) -> str:
+        allowed = [char if char.isalnum() or char in {"-", "_"} else "_" for char in name.strip()]
+        return "".join(allowed) or "profile"
 
     @staticmethod
     async def _safe_notify_user(user: discord.User | discord.Member, message: str) -> None:

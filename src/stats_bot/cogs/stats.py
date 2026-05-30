@@ -74,6 +74,15 @@ class StatsCog(commands.Cog):
                         (entry.name, int(entry.is_mvp), entry.kills),
                     )
 
+        profile_cog = self.bot.get_cog("ProfileCog")
+        if profile_cog is not None:
+            seen_players: set[str] = set()
+            for entry in parsed_entries:
+                if entry.name in seen_players:
+                    continue
+                seen_players.add(entry.name)
+                await profile_cog.refresh_profile_card_for_player(entry.name)
+
         summary_lines = [
             f"Recorded match totals for {len(parsed_entries)} players.",
             *[
