@@ -362,6 +362,39 @@ class ProfileCog(commands.Cog):
                     (player_name, discord_user_id, screenshot_path, ocr_text),
                 )
 
+    def _save_submission(
+        self,
+        discord_user_id: int,
+        source_channel_id: int,
+        source_message_id: int,
+        attachment_url: str,
+        local_path: str,
+        ocr_text: str,
+        player_name: str,
+    ) -> int:
+        with self.database.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO profile_submissions (
+                        discord_user_id,
+                        source_channel_id,
+                        source_message_id,
+                        attachment_url,
+                        local_path,
+                        ocr_text,
+                        player_name,
+                        status
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
+                    RETURNING id
+                    """,
+                    (discord_user_id, source_channel_id, source_message_id, attachment_url, local_path, ocr_text, player_name),
+                )
+                row = cursor.fetchone()
+
+        return int(row["id"])
+
     def _get_profile_by_user(self, discord_user_id: int) -> dict[str, Any] | None:
         with self.database.connect() as connection:
             with connection.cursor() as cursor:

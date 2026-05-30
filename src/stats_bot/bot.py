@@ -21,6 +21,7 @@ class ScrimBot(commands.Bot):
         self.database = database
         self.settings = settings
         self.guild_id = settings.guild_id
+        self._startup_refresh_done = False
 
     async def setup_hook(self) -> None:
         await self.add_cog(StatsCog(self, self.database))
@@ -37,6 +38,14 @@ class ScrimBot(commands.Bot):
 
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "unknown")
+
+        if self._startup_refresh_done:
+            return
+
+        self._startup_refresh_done = True
+        profile_cog = self.get_cog("ProfileCog")
+        if profile_cog is not None:
+            await profile_cog.refresh_profile_announcement()
 
 
 async def run_bot() -> None:
