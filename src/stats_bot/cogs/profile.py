@@ -5,13 +5,12 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 import logging
-import asyncio
 from typing import Any
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from ..db import Database
 from ..openrouter import OpenRouterOCRClient
@@ -218,7 +217,7 @@ class ProfileCog(commands.Cog):
         await self._safe_edit_interaction_message(interaction, message_text)
 
         if approved:
-            asyncio.create_task(self._finalize_approved_submission(submission, player_name))
+            await self._finalize_approved_submission(submission, player_name)
 
     async def _finalize_approved_submission(self, submission: dict[str, Any], player_name: str) -> None:
         await self._delete_submission_message(submission["source_channel_id"], submission["source_message_id"])
@@ -499,9 +498,15 @@ class ProfileCog(commands.Cog):
                 return
             channel = fetched_channel
 
-        with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+        try:
             message = await channel.fetch_message(message_id)
             await message.delete()
+        except discord.NotFound:
+            logger.warning("Submission message %s in channel %s was already deleted", message_id, channel_id)
+        except discord.Forbidden:
+            logger.warning("Missing permissions to delete submission message %s in channel %s", message_id, channel_id)
+        except discord.HTTPException:
+            logger.exception("Failed to delete submission message %s in channel %s", message_id, channel_id)
 
     async def _purge_bot_messages(self, channel: discord.TextChannel) -> None:
         bot_user = self.bot.user
@@ -589,7 +594,7 @@ class ProfileCog(commands.Cog):
         small_font = self._load_font(18)
         mono_font = self._load_font(18)
 
-        draw.text((110, 112), player_name, font=title_font, fill=(245, 249, 255, 255))
+        self._draw_fitted_text(draw, (110, 112), player_name, title_font, (245, 249, 255, 255), 255)
         draw.text((110, 175), f"Discord User: <@{discord_user_id}>" if discord_user_id else "Discord User: Not linked", font=subtitle_font, fill=(195, 206, 220, 255))
         draw.rounded_rectangle((110, 220, 285, 262), radius=16, fill=accent)
         draw.text((145, 228), "REGISTERED", font=self._load_font(18, bold=True), fill=(10, 18, 21, 255))
@@ -606,7 +611,7 @@ class ProfileCog(commands.Cog):
         draw.text((500, 586), "OCR TEXT", font=self._load_font(24, bold=True), fill=(159, 173, 191, 255))
         ocr_box = (500, 622, 1260, 704)
         self._rounded_panel(draw, ocr_box, radius=20, fill=(12, 17, 24, 255), outline=(60, 74, 92, 255))
-        self._draw_multiline_text_box(draw, (520, 642), self._truncate_text(ocr_text, 120), mono_font, (233, 239, 245, 255), 680)
+        self._draw_multiline_text_box(draw, (520, 642), self._truncate_text(ocr_text, 120), mono_font, (233, 239, 245, 255), 680, max_lines=2)
 
         self._draw_screenshot_panel(background, screenshot_path)
 
@@ -691,11 +696,24 @@ class ProfileCog(commands.Cog):
     ) -> None:
         values = [player_name, str(matches), str(mvps), str(kills), f"{kill_per_match:.2f}"]
         positions = [0.00, 0.38, 0.58, 0.74, 0.89]
-        for value, position in zip(values, positions, strict=False):
+        for index, (value, position) in enumerate(zip(values, positions, strict=False)):
+            if index == 0:
+                name_x = x + int(width * position)
+                for size in range(getattr(font, "size", 18), 12, -1):
+                    try:
+                        fitted_font = ImageFont.truetype("DejaVuSans.ttf", size=size)
+                    except OSError:
+                        fitted_font = font
+                    if draw.textlength(value, font=fitted_font) <= 250:
+                        draw.text((name_x, y + 12), value, font=fitted_font, fill=fill)
+                        break
+                else:
+                    draw.text((name_x, y + 12), value, font=font, fill=fill)
+                continue
             draw.text((x + int(width * position), y + 12), value, font=font, fill=fill)
 
     @staticmethod
-    def _draw_multiline_text_box(draw: ImageDraw.ImageDraw, position: tuple[int, int], text: str, font: ImageFont.ImageFont, fill: tuple[int, int, int, int], max_width: int) -> None:
+    def _draw_multiline_text_box(draw: ImageDraw.ImageDraw, position: tuple[int, int], text: str, font: ImageFont.ImageFont, fill: tuple[int, int, int, int], max_width: int, max_lines: int = 4) -> None:
         x, y = position
         words = text.split()
         lines: list[str] = []
@@ -707,12 +725,45 @@ class ProfileCog(commands.Cog):
                 continue
             if current:
                 lines.append(current)
-            current = word
+            if draw.textlength(word, font=font) <= max_width:
+                current = word
+                continue
+
+            partial = ""
+            for character in word:
+                candidate_piece = partial + character
+                if draw.textlength(candidate_piece, font=font) <= max_width:
+                    partial = candidate_piece
+                    continue
+                if partial:
+                    lines.append(partial)
+                partial = character
+            current = partial
         if current:
             lines.append(current)
 
-        for index, line in enumerate(lines[:4]):
+        for index, line in enumerate(lines[:max_lines]):
             draw.text((x, y + index * 24), line, font=font, fill=fill)
+
+    @staticmethod
+    def _draw_fitted_text(draw: ImageDraw.ImageDraw, position: tuple[int, int], text: str, font: ImageFont.ImageFont, fill: tuple[int, int, int, int], max_width: int) -> None:
+        x, y = position
+        for size in range(getattr(font, "size", 54), 16, -2):
+            try:
+                fitted_font = ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
+            except OSError:
+                fitted_font = font
+            if draw.textlength(text, font=fitted_font) <= max_width:
+                draw.text((x, y), text, font=fitted_font, fill=fill)
+                return
+        draw.text((x, y), text, font=font, fill=fill)
+
+    @staticmethod
+    def _rounded_mask(size: tuple[int, int], radius: int) -> Image.Image:
+        mask = Image.new("L", size, 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.rounded_rectangle((0, 0, size[0] - 1, size[1] - 1), radius=radius, fill=255)
+        return mask
 
     def _draw_screenshot_panel(self, background: Image.Image, screenshot_path: str | None) -> None:
         draw = ImageDraw.Draw(background)
@@ -725,13 +776,25 @@ class ProfileCog(commands.Cog):
             return
 
         screenshot_image = screenshot_image.convert("RGBA")
-        screenshot_image.thumbnail((290, 360), Image.Resampling.LANCZOS)
+        screenshot_image = ImageOps.pad(
+            screenshot_image,
+            (280, 380),
+            method=Image.Resampling.LANCZOS,
+            color=(10, 14, 20, 255),
+            centering=(0.5, 0.35),
+        )
         frame_w, frame_h = 320, 420
         frame_x, frame_y = 90, 300
         self._rounded_panel(draw, (frame_x, frame_y, frame_x + frame_w, frame_y + frame_h), radius=24, fill=(10, 14, 20, 255), outline=(82, 97, 118, 255))
         image_x = frame_x + (frame_w - screenshot_image.width) // 2
         image_y = frame_y + (frame_h - screenshot_image.height) // 2
-        background.paste(screenshot_image, (image_x, image_y), screenshot_image)
+
+        shadow = Image.new("RGBA", screenshot_image.size, (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow)
+        shadow_draw.rounded_rectangle((0, 0, screenshot_image.width - 1, screenshot_image.height - 1), radius=18, fill=(0, 0, 0, 85))
+        shadow = shadow.filter(ImageFilter.GaussianBlur(10))
+        background.alpha_composite(shadow, (image_x + 4, image_y + 6))
+        background.paste(screenshot_image, (image_x, image_y), self._rounded_mask(screenshot_image.size, 18))
 
     @staticmethod
     def _draw_footer(draw: ImageDraw.ImageDraw, player_name: str, font: ImageFont.ImageFont) -> None:
