@@ -182,28 +182,29 @@ class ProfileCog(commands.Cog):
         player_name: str,
         approved: bool,
     ) -> None:
-        message = interaction.message
-        if message is None:
-            return
-
         submission = self._get_submission(submission_id)
         if submission is None:
-            with suppress(discord.HTTPException):
-                await message.edit(content="I could not find that submission.", embed=None, view=None)
+            await self._safe_edit_interaction_message(interaction, "I could not find that submission.")
             return
 
         if approved:
+            logger.info(
+                "Approving profile submission %s for discord_user_id=%s player_name=%s",
+                submission_id,
+                submission.discord_user_id,
+                player_name,
+            )
             self._upsert_player_profile(
                 player_name=player_name,
                 discord_user_id=submission.discord_user_id,
                 screenshot_path=submission.local_path,
                 ocr_text=submission.ocr_text,
             )
+            logger.info("Saved profile for %s", player_name)
 
         updated = self._mark_submission_reviewed(submission_id, approved)
         if not updated:
-            with suppress(discord.HTTPException):
-                await message.edit(content="This submission was already handled.", embed=None, view=None)
+            await self._safe_edit_interaction_message(interaction, "This submission was already handled.")
             return
 
         message_text = (
@@ -211,8 +212,7 @@ class ProfileCog(commands.Cog):
             if approved
             else f"Declined. {player_name} was not registered."
         )
-        with suppress(discord.HTTPException):
-            await message.edit(content=message_text, embed=None, view=None)
+        await self._safe_edit_interaction_message(interaction, message_text)
 
         if approved:
             await self.refresh_profile_card(submission.discord_user_id, create_if_missing=True)
@@ -490,6 +490,14 @@ class ProfileCog(commands.Cog):
 
         with suppress(discord.Forbidden, discord.HTTPException):
             await channel.purge(limit=100, check=lambda message: message.author.id == bot_user.id)
+
+    async def _safe_edit_interaction_message(self, interaction: discord.Interaction, content: str) -> None:
+        message = interaction.message
+        if message is None:
+            return
+
+        with suppress(discord.HTTPException):
+            await message.edit(content=content, embed=None, view=None)
 
     async def _save_attachment_to_disk(self, attachment: discord.Attachment, file_path: Path) -> str:
         file_path.parent.mkdir(parents=True, exist_ok=True)
