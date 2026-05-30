@@ -43,10 +43,12 @@ class ProfileReviewView(discord.ui.View):
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green)
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer()
         await self.cog.handle_profile_decision(interaction, self.submission_id, self.player_name, approved=True)
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.red)
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer()
         await self.cog.handle_profile_decision(interaction, self.submission_id, self.player_name, approved=False)
 
 
@@ -104,13 +106,7 @@ class ProfileCog(commands.Cog):
         if resolved_channel is None:
             return
 
-        old_message_id = self._get_announcement_message_id(resolved_channel.id)
-        if old_message_id is not None:
-            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
-                old_message = await resolved_channel.fetch_message(old_message_id)
-                await old_message.delete()
-
-        await self._delete_previous_bot_messages(resolved_channel)
+        await self._purge_bot_messages(resolved_channel)
 
         embed = discord.Embed(
             title="Submit Your Profile",
@@ -186,9 +182,14 @@ class ProfileCog(commands.Cog):
         player_name: str,
         approved: bool,
     ) -> None:
+        message = interaction.message
+        if message is None:
+            return
+
         submission = self._get_submission(submission_id)
         if submission is None:
-            await interaction.response.send_message("I could not find that submission.", ephemeral=True)
+            with suppress(discord.HTTPException):
+                await message.edit(content="I could not find that submission.", embed=None, view=None)
             return
 
         if approved:
@@ -201,7 +202,8 @@ class ProfileCog(commands.Cog):
 
         updated = self._mark_submission_reviewed(submission_id, approved)
         if not updated:
-            await interaction.response.send_message("This submission was already handled.", ephemeral=True)
+            with suppress(discord.HTTPException):
+                await message.edit(content="This submission was already handled.", embed=None, view=None)
             return
 
         message_text = (
@@ -209,7 +211,8 @@ class ProfileCog(commands.Cog):
             if approved
             else f"Declined. {player_name} was not registered."
         )
-        await interaction.response.edit_message(content=message_text, embed=None, view=None)
+        with suppress(discord.HTTPException):
+            await message.edit(content=message_text, embed=None, view=None)
 
         if approved:
             await self.refresh_profile_card(submission.discord_user_id, create_if_missing=True)
@@ -480,17 +483,13 @@ class ProfileCog(commands.Cog):
                     (channel_id, message_id),
                 )
 
-    async def _delete_previous_bot_messages(self, channel: discord.TextChannel) -> None:
+    async def _purge_bot_messages(self, channel: discord.TextChannel) -> None:
         bot_user = self.bot.user
         if bot_user is None:
             return
 
-        async for message in channel.history(limit=100):
-            if message.author.id != bot_user.id:
-                continue
-
-            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
-                await message.delete()
+        with suppress(discord.Forbidden, discord.HTTPException):
+            await channel.purge(limit=100, check=lambda message: message.author.id == bot_user.id)
 
     async def _save_attachment_to_disk(self, attachment: discord.Attachment, file_path: Path) -> str:
         file_path.parent.mkdir(parents=True, exist_ok=True)
