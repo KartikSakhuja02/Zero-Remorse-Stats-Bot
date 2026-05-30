@@ -11,6 +11,12 @@ class Settings:
     guild_id: int | None
     database_url: str
     log_level: str
+    profile_submission_channel_id: int | None
+    openrouter_api_key: str | None
+    openrouter_model: str
+    openrouter_base_url: str
+    openrouter_app_name: str
+    openrouter_site_url: str | None
 
 
 def load_settings() -> Settings:
@@ -27,6 +33,18 @@ def load_settings() -> Settings:
     if not database_url:
         raise RuntimeError("DATABASE_URL is not set")
 
+    profile_submission_channel_id_raw = os.getenv("PROFILE_SUBMISSION_CHANNEL_ID", "").strip()
+    profile_submission_channel_id = int(profile_submission_channel_id_raw) if profile_submission_channel_id_raw else None
+
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip() or None
+    openrouter_model = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip() or "openai/gpt-4o-mini"
+    openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip() or "https://openrouter.ai/api/v1"
+    openrouter_app_name = os.getenv("OPENROUTER_APP_NAME", "Stats Bot").strip() or "Stats Bot"
+    openrouter_site_url = os.getenv("OPENROUTER_SITE_URL", "").strip() or None
+
+    if profile_submission_channel_id is not None and not openrouter_api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is required when PROFILE_SUBMISSION_CHANNEL_ID is set")
+
     log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
 
     return Settings(
@@ -34,6 +52,12 @@ def load_settings() -> Settings:
         guild_id=guild_id,
         database_url=database_url,
         log_level=log_level,
+        profile_submission_channel_id=profile_submission_channel_id,
+        openrouter_api_key=openrouter_api_key,
+        openrouter_model=openrouter_model,
+        openrouter_base_url=openrouter_base_url,
+        openrouter_app_name=openrouter_app_name,
+        openrouter_site_url=openrouter_site_url,
     )
 
 

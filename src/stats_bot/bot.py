@@ -1,28 +1,30 @@
 from __future__ import annotations
 
 import logging
-from typing import Sequence
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from .config import load_settings
 from .db import Database
 from .cogs.stats import StatsCog
+from .cogs.profile import ProfileCog
 
 logger = logging.getLogger(__name__)
 
 
 class ScrimBot(commands.Bot):
-    def __init__(self, database: Database, guild_id: int | None) -> None:
+    def __init__(self, database: Database, settings) -> None:
         intents = discord.Intents.default()
+        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.database = database
-        self.guild_id = guild_id
+        self.settings = settings
+        self.guild_id = settings.guild_id
 
     async def setup_hook(self) -> None:
         await self.add_cog(StatsCog(self, self.database))
+        await self.add_cog(ProfileCog(self, self.database, self.settings))
 
         if self.guild_id is not None:
             guild = discord.Object(id=self.guild_id)
@@ -42,7 +44,7 @@ async def run_bot() -> None:
     logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO))
 
     database = Database(settings.database_url)
-    bot = ScrimBot(database=database, guild_id=settings.guild_id)
+    bot = ScrimBot(database=database, settings=settings)
     async with bot:
         await bot.start(settings.token)
 

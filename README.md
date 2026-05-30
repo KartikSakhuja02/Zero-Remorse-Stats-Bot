@@ -1,6 +1,6 @@
 # Stats Bot
 
-Discord bot for tracking scrim performance:
+Discord bot for tracking scrim performance and profile registration:
 
 - player_name
 - matches
@@ -15,14 +15,16 @@ Discord bot for tracking scrim performance:
 - `/stats leaderboard sort_by:<kills|mvps|matches|km>`
 - `/stats recent`
 - `/add_player name:<player name>`
+- `/profile announce`
 
 This version stores one aggregate row per player. Each recorded match updates that player's totals.
+The profile workflow watches a submission channel, OCRs screenshots with OpenRouter, and DMs the user a private approval prompt.
 
 ## Local setup
 
 1. Create and activate a virtual environment.
 2. Install dependencies with `pip install -r requirements.txt`.
-3. Copy `.env.example` to `.env` and fill in your Discord token and PostgreSQL URL.
+3. Copy `.env.example` to `.env` and fill in your Discord token, submission channel, OpenRouter key, and PostgreSQL URL.
 4. Run `python src/main.py`.
 
 ## Entry format
@@ -39,9 +41,10 @@ The bot will create missing players automatically.
 2. Create the PostgreSQL database and user on the Pi.
 3. Clone this repo into a folder like `/opt/stats-bot`.
 4. Create a virtual environment and install `requirements.txt`.
-5. Create a `.env` file on the Pi with the token, optional guild ID, and `DATABASE_URL`.
-6. Run the bot once manually to confirm it logs in and creates tables.
-7. Install a systemd service so the bot restarts on boot.
+5. Create a `.env` file on the Pi with the token, optional guild ID, submission channel ID, OpenRouter key, and `DATABASE_URL`.
+6. Enable the Discord bot's Message Content Intent in the Developer Portal so it can watch image posts.
+7. Run the bot once manually to confirm it logs in and creates tables.
+8. Install a systemd service so the bot restarts on boot.
 
 ## PostgreSQL setup on the Pi
 
@@ -71,6 +74,16 @@ DATABASE_URL=postgresql://stats_bot:change-this-password@localhost:5432/stats_bo
 ```
 
 If you already have a remote PostgreSQL server, use its host instead of `localhost`.
+
+## Profile registration flow
+
+1. Create a text channel named `submit-your-profile` and put its channel ID in `PROFILE_SUBMISSION_CHANNEL_ID`.
+2. Run `/profile announce` once to post the instructions in that channel.
+3. Players send a screenshot of their profile in that channel.
+4. The bot OCRs the screenshot with OpenRouter, extracts the player name, and sends the user a DM with Approve and Decline buttons.
+5. Approving saves the player name to `player_stats`. Declining leaves the database unchanged.
+
+Note: Discord does not support truly private replies for normal message listeners, so the confirmation step is handled by DM.
 
 ## systemd service example
 
