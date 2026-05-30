@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 import logging
+import asyncio
 from typing import Any
 
 import discord
@@ -209,9 +210,6 @@ class ProfileCog(commands.Cog):
             await self._safe_edit_interaction_message(interaction, "This submission was already handled.")
             return
 
-        if approved:
-            await self._delete_submission_message(submission["source_channel_id"], submission["source_message_id"])
-
         message_text = (
             f"Approved. {player_name} is now registered."
             if approved
@@ -220,7 +218,12 @@ class ProfileCog(commands.Cog):
         await self._safe_edit_interaction_message(interaction, message_text)
 
         if approved:
-            await self.refresh_profile_card(submission["discord_user_id"], create_if_missing=True)
+            asyncio.create_task(self._finalize_approved_submission(submission, player_name))
+
+    async def _finalize_approved_submission(self, submission: dict[str, Any], player_name: str) -> None:
+        await self._delete_submission_message(submission["source_channel_id"], submission["source_message_id"])
+        await self.refresh_profile_card(submission["discord_user_id"], create_if_missing=True)
+        logger.info("Finalized approved profile for %s", player_name)
 
     async def refresh_profile_card(self, discord_user_id: int, create_if_missing: bool = False) -> bool | None:
         profile = self._get_profile_by_user(discord_user_id)
@@ -600,10 +603,10 @@ class ProfileCog(commands.Cog):
         self._draw_table_header(draw, 500, 462, 790, 34, (159, 173, 191, 255), small_font)
         self._draw_table_row(draw, 500, 502, 790, 62, player_name, matches, mvps, kills, kill_per_match, (245, 249, 255, 255), mono_font)
 
-        draw.text((500, 592), "OCR TEXT", font=self._load_font(24, bold=True), fill=(159, 173, 191, 255))
-        ocr_box = (500, 630, 1260, 708)
+        draw.text((500, 586), "OCR TEXT", font=self._load_font(24, bold=True), fill=(159, 173, 191, 255))
+        ocr_box = (500, 622, 1260, 704)
         self._rounded_panel(draw, ocr_box, radius=20, fill=(12, 17, 24, 255), outline=(60, 74, 92, 255))
-        self._draw_multiline_text_box(draw, (520, 648), self._truncate_text(ocr_text, 180), mono_font, (233, 239, 245, 255), 720)
+        self._draw_multiline_text_box(draw, (520, 642), self._truncate_text(ocr_text, 120), mono_font, (233, 239, 245, 255), 680)
 
         self._draw_screenshot_panel(background, screenshot_path)
 
@@ -733,7 +736,7 @@ class ProfileCog(commands.Cog):
     @staticmethod
     def _draw_footer(draw: ImageDraw.ImageDraw, player_name: str, font: ImageFont.ImageFont) -> None:
         footer = f"Profile generated for {player_name} | updated live when scrim results are submitted"
-        draw.text((500, 732), footer, font=font, fill=(146, 158, 174, 255))
+        draw.text((500, 726), footer, font=font, fill=(146, 158, 174, 255))
 
     @staticmethod
     def _load_screenshot_image(screenshot_path: str | None) -> Image.Image | None:
