@@ -207,6 +207,14 @@ class ProfileCog(commands.Cog):
             tracker_profile = await self.tracker_client.fetch_profile(normalized_ign)
         except Exception as exc:
             logger.exception("Tracker lookup failed for %s", normalized_ign)
+            error_message = str(exc)
+            if "401" in error_message or "Invalid authentication credentials" in error_message:
+                await interaction.followup.send(
+                    "Tracker auth failed. Check that `TRACKER_API_KEY` is the app key from your Tracker developer app, not a bearer token, and restart the bot.",
+                    ephemeral=True,
+                )
+                return
+
             await interaction.followup.send(f"I could not find that Tracker profile: {exc}", ephemeral=True)
             return
 
