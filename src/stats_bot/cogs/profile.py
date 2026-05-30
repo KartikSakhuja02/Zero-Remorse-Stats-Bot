@@ -101,6 +101,34 @@ class ProfileCardView(discord.ui.View):
         return embed.title[len(prefix) :].strip() or None
 
 
+class TrackerLinkConfirmView(discord.ui.View):
+    def __init__(self, cog: "ProfileCog", requester_id: int, tracker_profile: TrackerProfile) -> None:
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.requester_id = requester_id
+        self.tracker_profile = tracker_profile
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message("This confirmation is not for you.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Yes, that's me", style=discord.ButtonStyle.green)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer()
+        await self.cog.confirm_tracker_link(interaction, self.tracker_profile)
+
+    @discord.ui.button(label="No, not me", style=discord.ButtonStyle.red)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            content="No link was saved. If this was the wrong profile, try `/trn` again with the correct IGN.",
+            embed=None,
+            view=None,
+        )
+
+
 class ProfileCog(commands.Cog):
     def __init__(self, bot: commands.Bot, database: Database, settings: Any) -> None:
         self.bot = bot
@@ -168,25 +196,46 @@ class ProfileCog(commands.Cog):
             await interaction.followup.send("Please provide a valid IGN.", ephemeral=True)
             return
 
-        linked_name = normalized_ign
-        if self.tracker_client is not None:
-            try:
-                tracker_profile = await self.tracker_client.fetch_profile(normalized_ign)
-                linked_name = tracker_profile.display_name or normalized_ign
-            except Exception:
-                logger.exception("Tracker lookup failed for %s", normalized_ign)
-
-        self._link_discord_user_to_profile(linked_name, interaction.user.id)
-
-        refreshed = await self.refresh_profile_card(interaction.user.id, create_if_missing=True)
-        if refreshed is None:
+        if self.tracker_client is None:
             await interaction.followup.send(
-                f"Linked your Discord account to {linked_name}, but I could not post the profile card because the stats channel is not configured.",
+                "Tracker lookup is not configured yet. Set `TRACKER_API_KEY`, `TRACKER_TITLE_SLUG`, and `TRACKER_PLATFORM` first.",
                 ephemeral=True,
             )
             return
 
-        await interaction.followup.send(f"Linked your Discord account to {linked_name}.", ephemeral=True)
+        try:
+            tracker_profile = await self.tracker_client.fetch_profile(normalized_ign)
+        except Exception as exc:
+            logger.exception("Tracker lookup failed for %s", normalized_ign)
+            await interaction.followup.send(f"I could not find that Tracker profile: {exc}", ephemeral=True)
+            return
+
+        embed = self._build_tracker_preview_embed(tracker_profile)
+        view = TrackerLinkConfirmView(self, interaction.user.id, tracker_profile)
+        await interaction.followup.send(
+            content="Is this your profile? If yes, I will register it to your Discord account.",
+            embed=embed,
+            view=view,
+            ephemeral=True,
+        )
+
+    async def confirm_tracker_link(self, interaction: discord.Interaction, tracker_profile: TrackerProfile) -> None:
+        self._link_discord_user_to_profile(tracker_profile.display_name, interaction.user.id)
+
+        refreshed = await self.refresh_profile_card(interaction.user.id, create_if_missing=True)
+        if refreshed is None:
+            await interaction.edit_original_response(
+                content=f"Linked to {tracker_profile.display_name}, but I could not refresh the profile card because the stats channel is not configured.",
+                embed=None,
+                view=None,
+            )
+            return
+
+        await interaction.edit_original_response(
+            content=f"Linked your Discord account to {tracker_profile.display_name}.",
+            embed=None,
+            view=None,
+        )
 
     async def refresh_profile_announcement(self, channel: discord.TextChannel | None = None) -> None:
         if self.settings.profile_submission_channel_id is None:
@@ -697,6 +746,48 @@ class ProfileCog(commands.Cog):
             return None
 
         return discord.File(screenshot_file, filename=screenshot_file.name)
+
+    @staticmethod
+    def _build_tracker_preview_embed(tracker_profile: TrackerProfile) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"Tracker Profile Preview - {tracker_profile.display_name}",
+            url=tracker_profile.profile_url,
+            color=discord.Color.orange(),
+            description="Check the stats below and confirm whether this is your profile.",
+        )
+        embed.add_field(name="IGN", value=tracker_profile.display_name, inline=True)
+        embed.add_field(name="Platform", value=tracker_profile.platform, inline=True)
+        embed.add_field(name="Tracker", value=tracker_profile.title_slug, inline=True)
+
+        if stats_lines := ProfileCog._format_tracker_stats(tracker_profile.stats):
+            embed.add_field(name="Stats", value="\n".join(stats_lines), inline=False)
+
+        embed.set_footer(text="Yes, that's me = save it. No, not me = nothing is linked.")
+        return embed
+
+    @staticmethod
+    def _format_tracker_stats(stats: dict[str, str]) -> list[str]:
+        preferred_keys = ["matchesPlayed", "wins", "kills", "deaths", "kdRatio", "score"]
+        friendly_names = {
+            "matchesPlayed": "Matches",
+            "wins": "Wins",
+            "kills": "Kills",
+            "deaths": "Deaths",
+            "kdRatio": "K/D",
+            "score": "Score",
+        }
+
+        lines: list[str] = []
+        for key in preferred_keys:
+            value = stats.get(key)
+            if value is None:
+                continue
+            lines.append(f"**{friendly_names.get(key, key)}**: {value}")
+
+        if lines:
+            return lines
+
+        return lines or [f"**{key}**: {value}" for key, value in list(stats.items())[:4]]
 
     @staticmethod
     def _truncate_text(text: str, limit: int = 1024) -> str:
